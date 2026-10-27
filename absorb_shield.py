@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.15'
+BSM_VERSION = '2.17'
 
 # ------------------------------- Настройки --------------------------------
 

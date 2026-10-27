@@ -94,7 +94,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.15'
+BSM_VERSION = '2.17'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -106,6 +106,8 @@ DEFLECT_SPEEDUP = 1.05  # ...и чуть-чуть при каждом отбив
 DEFLECT_MAX_SPEED = 44.0  # ...но не быстрее этого (м/с).
 PANDA_SPEED = 30.0  # С этой скорости отбивание — «внутренний покой» (раз).
 PANDA_TIME = 0.7  # Сколько бомба кружит вокруг отбивающего (сек).
+DEFLECT_WINDOW = 0.25  # Нажал «Удар» не раньше стольких сек до попадания —
+#                        мяч отбит (на любой скорости, сколько угодно раз).
 PINGPONG_TURN = 5.0  # Как резко отбитая бомба доворачивает (рад/с) — плавно.
 SPIRAL_RADIUS = 0.25  # Лёгкая равномерная спираль в полёте (метров)...
 SPIRAL_RATE = 10.0  # ...и её скорость вращения (рад/с).
@@ -494,8 +496,12 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
             want, dist = _norm([a - b for a, b in zip(tpos, bpos)])
             # It goes off when it physically touches them (see
             # _patched_bomb_handle_impact); this is only a backstop - which
-            # must not let a fast bomb skip past them between ticks.
-            if dist < max(0.55, speed * _TICK):
+            # checks the whole path since last tick, so a fast bomb can't
+            # skip past them.
+            if (dist < max(0.55, speed * _TICK)
+                    or _seg_dist(state['last'], bpos, tpos) < 0.7):
+                if _try_timed_deflect(bomb):
+                    return  # Punched in time: back it goes.
                 _stop()
                 _snd('big_impact', 1.0, bpos)
                 bomb.handlemessage(ExplodeMessage())
@@ -544,6 +550,23 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
         _TICK, _step, repeat=True
     )
     _step()
+
+
+def _try_timed_deflect(bomb: Bomb) -> bool:
+    """The ball reached its target: if they hit punch just before, it's
+    returned - at any speed, as many times as they keep timing it."""
+    state = getattr(bomb, '_bst_homing', None)
+    if state is None or getattr(bomb, '_bst_flight', None) is None:
+        return False
+    target = state.get('target')
+    spaz = target.getdelegate(Spaz) if target else None
+    if spaz is None or not spaz.is_alive() or not spaz.node:
+        return False
+    since = bs.time() * 1000.0 - getattr(spaz, 'last_punch_time_ms', -9999)
+    if since > DEFLECT_WINDOW * 1000.0:
+        return False
+    _deflect_homing(spaz, bomb)
+    return True
 
 
 def _deflect_homing(spaz: Spaz, bomb: Bomb) -> None:
@@ -609,6 +632,17 @@ def _deflect_homing(spaz: Spaz, bomb: Bomb) -> None:
         _snd('activate_beep', 0.8, back_to.position)
 
 
+def _seg_dist(a: Sequence[float], b: Sequence[float],
+              p: Sequence[float]) -> float:
+    """Distance from point p to the segment a-b."""
+    ab = [b[k] - a[k] for k in range(3)]
+    ap = [p[k] - a[k] for k in range(3)]
+    len2 = sum(c * c for c in ab)
+    t = 0.0 if len2 < 1e-9 else max(0.0, min(1.0, sum(
+        ab[k] * ap[k] for k in range(3)) / len2))
+    return math.dist(p, [a[k] + ab[k] * t for k in range(3)])
+
+
 def _turn_toward(cur: Sequence[float], want: Sequence[float],
                  max_angle: float) -> tuple[float, float, float]:
     """Rotate a heading toward another by at most max_angle radians."""
@@ -634,10 +668,18 @@ def _pingpong_fly(bomb: Bomb, bnode: bs.Node, state: dict,
                   want: Sequence[float], speed: float) -> None:
     """A knocked-back ball: smooth turns only, a gentle even spiral, big
     sparks. Bumping into floors/walls just eases it upward."""
-    heading = _turn_toward(state['dir'], want, PINGPONG_TURN * _TICK)
+    # Faster ball, tighter turns (so it never sails past at 40+ m/s); on
+    # the final approach it simply flies straight in - it's lined up by then.
+    turn = max(PINGPONG_TURN, speed / 3.0) * _TICK
+    target = state['target']
+    near = target is not None and math.dist(
+        target.position_center, bnode.position) < speed * 0.3
+    heading = tuple(want) if near else _turn_toward(state['dir'], want, turn)
     if bs.time() - getattr(bomb, '_bst_bump_time', -9.0) < 0.15:
+        # Against a wall or the floor (even on the final approach): ease up
+        # and over it.
         climb, _ = _norm((heading[0], heading[1] + 0.8, heading[2]))
-        heading = _turn_toward(heading, climb, PINGPONG_TURN * _TICK)
+        heading = climb if near else _turn_toward(heading, climb, turn)
     state['dir'] = heading
     state['spin'] = state.get('spin', 0.0) + SPIRAL_RATE * _TICK
     side, up = _perp_basis(heading)
@@ -1330,8 +1372,9 @@ def _whip_target(spaz: Spaz, facing: Sequence[float]) -> bs.Node | None:
 
 
 def _ground_under(pos: Sequence[float]) -> tuple:
-    """Rough floor point under a fighter (no ray casts in the game API)."""
-    return (pos[0], pos[1] - 0.9, pos[2])
+    """Just above the floor under a fighter (no ray casts in the game API;
+    erring high keeps the tentacle visible instead of inside the floor)."""
+    return (pos[0], pos[1] - 0.35, pos[2])
 
 
 def _whip_curve(base: Sequence[float], tip: Sequence[float], phase: float,
@@ -1375,8 +1418,12 @@ def _fire_whip(spaz: Spaz) -> None:
                            here[2] + facing[2] * 0.8))
     straight_end = (start[0] + facing[0] * 8.0, start[1],
                     start[2] + facing[2] * 8.0)
-    beads = _tentacle_beads(start, max(_WHIP_BODY, _WHIP_SEGMENTS), 0.36,
-                            0.14, None)
+    beads = _tentacle_beads(start, max(_WHIP_BODY, _WHIP_SEGMENTS), 0.45,
+                            0.18, None)
+    head_light = bs.newnode('light', attrs={
+        'position': start, 'color': _SLIME, 'radius': 0.25,
+        'intensity': 1.0, 'height_attenuated': False,
+        'volume_intensity_scale': 0.3})
     source = spaz.source_player
     state: dict[str, Any] = {'time': 0.0, 'phase': 'crawl', 'victim': None,
                              'minis': [], 'head': start, 'trail': [start],
@@ -1393,6 +1440,14 @@ def _fire_whip(spaz: Spaz) -> None:
         spaz._bst_whip_active = False
         spaz._bst_whip_timer = None
         _delete_all(beads)
+        if head_light:
+            head_light.delete()
+
+    def _slime_body(pts: list) -> None:
+        """Slime all along the body: visible even if the beads aren't."""
+        for pos in pts[::2]:
+            bs.emitfx(position=pos, velocity=(0.0, 0.6, 0.0), count=1,
+                      scale=0.55, spread=0.04, chunk_type='slime')
 
     def _latch(victim_node: bs.Node) -> None:
         state['phase'] = 'hold'
@@ -1490,12 +1545,17 @@ def _fire_whip(spaz: Spaz) -> None:
                     _rear_up(None)
             if state['phase'] == 'crawl':
                 try:
-                    _draw_tentacle(beads, _body_along_trail(), True)
+                    body = _body_along_trail()
+                    _draw_tentacle(beads, body, False)
+                    if head_light:
+                        head_light.position = head
+                    if int(tnow / _TICK) % 2 == 0:
+                        _slime_body(body)
                 except Exception:
                     _BEADS_OK[0] = False
                 if int(tnow / _TICK) % 3 == 0:
-                    bs.emitfx(position=head, velocity=(0, 1, 0), count=2,
-                              scale=0.5, spread=0.15, chunk_type='slime')
+                    bs.emitfx(position=head, velocity=(0, 1, 0), count=3,
+                              scale=0.6, spread=0.15, chunk_type='slime')
                     _snd('sticky_impact', 0.2, head)
                 return
             phase = state['phase']
@@ -1548,11 +1608,11 @@ def _fire_whip(spaz: Spaz) -> None:
         amp = 0.35 if state['phase'] in ('rise', 'flail') else 0.15
         try:
             pts = _whip_curve(base, tip, tnow * 12.0, amp, len(beads))
-            _draw_tentacle(beads, pts, True)
-            if int(tnow / _TICK) % 3 == 0:  # Always visible, even w/o beads.
-                for pos in pts[::3]:
-                    bs.emitfx(position=pos, velocity=(0, 0, 0), count=1,
-                              scale=0.4, spread=0.02, chunk_type='slime')
+            _draw_tentacle(beads, pts, False)
+            if head_light:
+                head_light.position = tip
+            if int(tnow / _TICK) % 2 == 0:  # Always visible, even w/o beads.
+                _slime_body(pts)
         except Exception:
             _BEADS_OK[0] = False  # Visuals must never stop the whip.
 
@@ -2241,6 +2301,10 @@ def _patched_bomb_handle_impact(self: Bomb) -> None:
         if not node or node.getnodetype() != 'spaz' or node == self.owner:
             self._bst_bump_time = bs.time()  # type: ignore[attr-defined]
             return
+        homing = getattr(self, '_bst_homing', None)
+        if (homing is not None and node == homing.get('target')
+                and _try_timed_deflect(self)):
+            return  # Its target punched in time: deflected, not hit.
     _orig_bomb_handle_impact(self)
 
 
