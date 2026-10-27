@@ -28,13 +28,12 @@
   небольшим аккуратным взрывом.
 
 Мина, заряжен:
-  * заряженная мина, взведясь, разбрасывает вокруг себя до 6 мин так, чтобы
-    взрыв одной не задевал соседей; они ложатся по рельефу, а свалившиеся с
-    обрыва или в пропасть исчезают — сколько останется и где, решает
-    местность;
-  * пнёшь свою заряженную мину, пока она не взвелась, — она минирует втрое
-    большую площадь втрое большим числом мин, уже не заботясь о том, что
-    взрыв одной потянет соседей (цепная реакция).
+  * заряженная мина, взведясь, по одной выкладывает вокруг себя 6 мин ровным
+    кольцом в 2 м (взрыв одной не задевает соседей); свалившиеся с обрыва
+    или в пропасть исчезают;
+  * пнёшь свою заряженную мину, пока она не взвелась, — суперзаряд: после
+    кольца каждая из 6 мин по очереди выбрасывает ещё по 2 наружу (всего
+    18, цепная реакция возможна).
 
 Ядерный суицид (нужен Absorb Shield):
   подобрал проклятие («суицид») и спарировал щитом его взрыв — открывается
@@ -58,12 +57,12 @@
     каждого своё щупальце; бомба и враги притягиваются друг к другу
     (лёгкая бомба летит быстрее), пока не слипнутся, а потом обвивает;
   * удар кулаком по своей липкой бомбе — она превращается в 3 щупальца
-    (до 9). Каждое нажатие «Бомба» — одно щупальце: оно вырывается из земли
-    прямо под врагом, на которого ты смотришь (узкий конус ±15°, на всю
-    карту), обвивает его и валит с ног; на него налепляются 4 липкие
-    мини-бомбы и через 0.8 с взрываются прямо на нём (заряд делает взрывы
-    шире), потом щупальце уходит обратно в землю. Нет никого в конусе —
-    вырывается в 6 м впереди и хватает того, кто там окажется.
+    (до 9). Каждое нажатие «Бомба» — одно щупальце: оно выползает у твоих
+    ног и медленно ползёт по земле к врагу, на которого ты смотришь (узкий
+    конус ±15°, на всю карту); кого настигнет первым — под тем встаёт из
+    земли, обвивает и валит с ног; на него налепляются 4 липкие мини-бомбы
+    и через 0.8 с взрываются прямо на нём (заряд делает взрывы шире). Нет
+    никого в конусе — проползает 8 м вперёд.
 
 Работает и на «Счастливых мыслях»: направления и расстояния считаются в 3D.
 Мод нужен только хосту: в сетевой игре всё считается на сервере.
@@ -94,7 +93,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.13'
+BSM_VERSION = '2.14'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -112,14 +111,12 @@ SHOT_SPEED = 20.0  # Скорость снаряда (м/с).
 SHOT_LIFETIME = 3.0  # Через сколько секунд снаряд взрывается сам.
 SHOT_DAMAGE = 500.0  # Урон снаряда (1000 = полное здоровье).
 SHOT_BLAST_RADIUS = 1.2  # Радиус небольшого взрыва снаряда (метров).
-MINE_SPREAD_COUNT = 6  # Сколько мин разбрасывает заряженная мина (не больше).
-MINE_SPREAD_MIN = 2.0  # Ближе этого мины не ложатся (метров)...
-MINE_SPREAD_MAX = 3.2  # ...и не дальше этого.
-MINE_SAFE_SPACING = 1.9  # Так далеко друг от друга, чтобы взрыв одной мины
-#                          (радиус 1.4 м) не задел соседку.
-MINE_KICK_SCALE = 3.0  # Пнутая мина: во столько раз больше площадь и мин.
-MINE_WAVES = 4  # Мины вылетают волнами, от ближних к дальним...
-MINE_WAVE_DELAY = 0.25  # ...с такой паузой (сек).
+MINE_RING = 6  # Заряженная мина выкладывает столько мин ровным кольцом...
+MINE_RING_DIST = 2.0  # ...на таком расстоянии (соседки тоже в 2 м друг от
+#                       друга — вне радиуса взрыва мины 1.4 м).
+MINE_CHILDREN = 2  # Пнутая: каждая мина кольца выбрасывает ещё столько...
+MINE_CHILD_DIST = 1.9  # ...на таком расстоянии наружу (цепочки возможны).
+MINE_SEQ_DELAY = 0.12  # Мины вылетают по одной с такой паузой (сек).
 NUKE_QTE_TIME = 3.0  # Время на QTE ядерного суицида (сек).
 NUKE_QTE_KEYS = 6  # Сколько кнопок нужно нажать.
 NUKE_COUNTDOWN = 3.0  # Отсчёт до ядерного взрыва после QTE (сек).
@@ -139,6 +136,8 @@ WHIP_RANGE = 60.0  # Дальность щупальца: на всю карту
 WHIP_ANGLE = 15.0  # Конус поиска цели от взгляда (градусов в каждую сторону).
 WHIP_PER_BOMB = 3  # Сколько щупалец даёт одна липучка.
 WHIP_HEIGHT = 3.2  # Как высоко щупальце вырастает из земли (метров).
+WHIP_CRAWL_SPEED = 5.0  # С какой скоростью щупальце ползёт к цели (м/с).
+WHIP_CRAWL_TIME = 12.0  # Сколько оно ползёт, прежде чем сдаться (сек).
 WHIP_FUSE = 0.8  # Через сколько взрываются налепленные мини-бомбы (сек).
 WHIP_MAX = 9  # Сколько щупалец можно носить.
 FX_STRENGTH = 0.5  # Сила вспышек, света и тряски камеры (1.0 = максимум).
@@ -830,35 +829,6 @@ def _fire_shot(spaz: Spaz) -> None:
     _snd('cork_pop', 0.6, start)
 
 
-def _mine_spots(big: bool) -> list[tuple[float, float]]:
-    """(angle, distance) for the scattered mines.
-
-    Normal: up to MINE_SPREAD_COUNT, each out of every other's blast radius
-    (and the center mine's), as many as fit. Kicked: triple the area and the
-    count, no spacing - neighbors may set each other off."""
-    if big:
-        far = MINE_SPREAD_MAX * math.sqrt(MINE_KICK_SCALE)
-        spots = []
-        for _ in range(int(MINE_SPREAD_COUNT * MINE_KICK_SCALE)):
-            # Uniform over the ring's area, not bunched at the middle.
-            dist = math.sqrt(random.uniform(MINE_SPREAD_MIN ** 2, far ** 2))
-            spots.append((random.uniform(0.0, 2.0 * math.pi), dist))
-        return spots
-    placed: list[tuple[float, float]] = []
-    points: list[tuple[float, float]] = [(0.0, 0.0)]  # The center mine.
-    for _ in range(80):
-        if len(placed) >= MINE_SPREAD_COUNT:
-            break
-        ang = random.uniform(0.0, 2.0 * math.pi)
-        dist = random.uniform(MINE_SPREAD_MIN, MINE_SPREAD_MAX)
-        x, z = math.cos(ang) * dist, math.sin(ang) * dist
-        if all(math.hypot(x - px, z - pz) >= MINE_SAFE_SPACING
-               for px, pz in points):
-            placed.append((ang, dist))
-            points.append((x, z))
-    return placed
-
-
 def _kick_mine(spaz: Spaz, mine: Bomb) -> None:
     """Kicked our charged mine before it armed: mine a much bigger area."""
     mine._bst_mine_spread = False  # type: ignore[attr-defined]
@@ -872,59 +842,75 @@ def _kick_mine(spaz: Spaz, mine: Bomb) -> None:
 
 
 def _spread_mines(mine: Bomb, big: bool = False) -> None:
-    """A charged mine tosses more mines around itself. They settle wherever
-    the ground takes them; any that drop off a ledge or into the void are
-    scrapped - so terrain decides how many stay and where."""
+    """A charged mine lays an even ring of mines around itself, one by one.
+    Kicked (super-charged): once the ring is down, each of its mines tosses
+    two more further out, again one by one. Mines that drop off a ledge or
+    into the void are scrapped (and a scrapped one tosses nothing)."""
     if not mine.node:
         return
     pos = mine.node.position
     source = mine.get_source_player(bs.Player)
     owner = mine.owner
-    flight = 0.55
-    spots = sorted(_mine_spots(big), key=lambda spot: spot[1])
-    far = max(dist for _, dist in spots) if spots else MINE_SPREAD_MAX
-    # Out in waves, nearest ring first.
-    per_wave = max(1, math.ceil(len(spots) / MINE_WAVES))
-    waves = [spots[i:i + per_wave] for i in range(0, len(spots), per_wave)]
-    for num, wave in enumerate(waves):
-        bs.timer(num * MINE_WAVE_DELAY,
-                 bs.CallStrict(_toss_mine_wave, mine, pos, wave, far, flight,
-                               source, owner, big))
+    base = random.uniform(0.0, 2.0 * math.pi)
+    ring = [(base + 2.0 * math.pi * i / MINE_RING, MINE_RING_DIST)
+            for i in range(MINE_RING)]
+    laid: list[Bomb] = []
 
+    def _children() -> None:
+        # Second wave (kicked only), still strictly one at a time.
+        num = 0
+        for parent in laid:
+            if not parent.node:
+                continue
+            ppos = parent.node.position
+            out = math.atan2(ppos[2] - pos[2], ppos[0] - pos[0])
+            for j in range(MINE_CHILDREN):
+                spread = (j - (MINE_CHILDREN - 1) / 2.0) * 0.6  # ~+-17 deg.
+                bs.timer(num * MINE_SEQ_DELAY, bs.CallStrict(
+                    _toss_mine, ppos, out + spread, MINE_CHILD_DIST, source,
+                    owner, None))
+                num += 1
 
-def _toss_mine_wave(mine: Bomb, pos: Sequence[float], wave: list,
-                    far: float, flight: float, source: Any, owner: Any,
-                    big: bool) -> None:
-    tossed = []
-    for ang, dist in wave:
-        speed = dist / flight
-        extra = Bomb(
-            position=(pos[0], pos[1] + 0.5, pos[2]),
-            velocity=(math.cos(ang) * speed, 3.5, math.sin(ang) * speed),
-            bomb_type='land_mine',
-            source_player=source,
-            owner=owner,
-        ).autoretain()
-        tossed.append(extra)
-    bs.emitfx(position=pos, velocity=(0, 3, 0), count=8 if not big else 15,
+    for i, (ang, dist) in enumerate(ring):
+        bs.timer(i * MINE_SEQ_DELAY, bs.CallStrict(
+            _toss_mine, pos, ang, dist, source, owner, laid))
+    if big:
+        # After the whole ring has landed and settled.
+        bs.timer(MINE_RING * MINE_SEQ_DELAY + 1.0, _children)
+    bs.emitfx(position=pos, velocity=(0, 3, 0), count=12 if not big else 25,
               scale=0.6, spread=0.4, chunk_type='metal')
-    _snd('cork_pop', 1.0, pos)
-    _snd('bomb_drop01' if not big else 'bomb_drop02', 0.7, pos)
+
+
+def _toss_mine(origin: Sequence[float], ang: float, dist: float,
+               source: Any, owner: Any, laid: list | None) -> None:
+    """Toss one mine to land ~dist away; scrap it if it falls off."""
+    flight = 0.55
+    speed = dist / flight
+    extra = Bomb(
+        position=(origin[0], origin[1] + 0.5, origin[2]),
+        velocity=(math.cos(ang) * speed, 3.5, math.sin(ang) * speed),
+        bomb_type='land_mine',
+        source_player=source,
+        owner=owner,
+    ).autoretain()
+    _snd('cork_pop', 0.8, origin)
 
     def _settle() -> None:
-        for extra in tossed:
-            if not extra.node:
-                continue
-            epos = extra.node.position
-            fell = epos[1] < pos[1] - 1.2
-            slid = math.hypot(epos[0] - pos[0], epos[2] - pos[2]) > far + 1.5
-            if fell or slid:
-                # Off the edge: no place for a mine here.
-                bs.emitfx(position=epos, velocity=(0, 1, 0), count=6,
-                          scale=0.5, spread=0.2, chunk_type='spark')
-                extra.handlemessage(bs.DieMessage())
-            else:
-                extra.arm()
+        if not extra.node:
+            return
+        epos = extra.node.position
+        fell = epos[1] < origin[1] - 1.2
+        slid = math.hypot(epos[0] - origin[0], epos[2] - origin[2]) > dist + 1.5
+        if fell or slid:
+            # Off the edge: no place for a mine here.
+            bs.emitfx(position=epos, velocity=(0, 1, 0), count=6,
+                      scale=0.5, spread=0.2, chunk_type='spark')
+            extra.handlemessage(bs.DieMessage())
+            return
+        extra.arm()
+        _snd('bomb_drop01', 0.5, epos)
+        if laid is not None:
+            laid.append(extra)
 
     bs.timer(flight + 0.45, _settle)
 
@@ -1233,10 +1219,15 @@ def _whip_curve(base: Sequence[float], tip: Sequence[float], phase: float,
     return pts
 
 
+_WHIP_BODY = 14  # Beads in the crawling body.
+_WHIP_GAP = 0.3  # Spacing between them along the trail (meters).
+
+
 def _fire_whip(spaz: Spaz) -> None:
-    """The bomb button: a tentacle bursts out of the ground under the enemy
-    you're looking at (anywhere on the map, within a narrow cone), wraps
-    them up and slaps four mini sticky bombs on them."""
+    """The bomb button: a tentacle slithers out at your feet and crawls along
+    the ground toward the enemy you're looking at (narrow cone, anywhere on
+    the map). Whoever it reaches - its target or anyone in the way - it rears
+    up under, wraps and slaps four mini sticky bombs on."""
     node = spaz.node
     spaz._bst_whips -= 1
     charge, spaz._bst_whip_charge = spaz._bst_whip_charge, 0.0
@@ -1245,26 +1236,23 @@ def _fire_whip(spaz: Spaz) -> None:
 
     facing = _look_dir(spaz)
     target = _whip_target(spaz, facing)
-    if target is not None:
-        base = _ground_under(target.position)
-    else:
-        # Nobody in the cone: it erupts a little way ahead, grabbing
-        # whoever happens to be there.
-        here = node.position
-        base = _ground_under((here[0] + facing[0] * 6.0, here[1],
-                              here[2] + facing[2] * 6.0))
-    beads = _tentacle_beads(base, _WHIP_SEGMENTS, 0.26, 0.08, None)
+    here = node.position
+    start = _ground_under((here[0] + facing[0] * 0.8, here[1],
+                           here[2] + facing[2] * 0.8))
+    straight_end = (start[0] + facing[0] * 8.0, start[1],
+                    start[2] + facing[2] * 8.0)
+    beads = _tentacle_beads(start, max(_WHIP_BODY, _WHIP_SEGMENTS), 0.36,
+                            0.14, None)
     source = spaz.source_player
-    state: dict[str, Any] = {'time': 0.0, 'phase': 'rise', 'victim': None,
-                             'minis': []}
+    state: dict[str, Any] = {'time': 0.0, 'phase': 'crawl', 'victim': None,
+                             'minis': [], 'head': start, 'trail': [start],
+                             'crawled': 0.0, 'base': start}
 
-    # Ground bursting open.
-    bs.emitfx(position=base, velocity=(0, 6, 0), count=15, scale=0.8,
-              spread=0.5, chunk_type='rock')
-    bs.emitfx(position=base, count=2, emit_type='tendrils',
+    bs.emitfx(position=start, velocity=(0, 4, 0), count=10, scale=0.7,
+              spread=0.3, chunk_type='rock')
+    bs.emitfx(position=start, count=1, emit_type='tendrils',
               tendril_type='smoke')
-    _snd('impact_hard', 0.9, base)
-    _snd('splatter', 0.8, base)
+    _snd('splatter', 0.8, start)
     _snd('swip2', 0.8, node.position)
 
     def _finish() -> None:
@@ -1303,27 +1291,89 @@ def _fire_whip(spaz: Spaz) -> None:
             bs.timer(WHIP_FUSE + 0.1 * i,
                      bs.WeakCallStrict(mini.handlemessage, ExplodeMessage()))
 
+    def _rear_up(victim: bs.Node | None) -> None:
+        state['phase'] = 'rise'
+        state['rise_at'] = state['time']
+        state['base'] = state['head']
+        state['rise_victim'] = victim
+        bs.emitfx(position=state['head'], velocity=(0, 6, 0), count=12,
+                  scale=0.8, spread=0.4, chunk_type='rock')
+        _snd('impact_hard', 0.9, state['head'])
+
+    def _body_along_trail() -> list[tuple]:
+        """Beads laid back along the path the head took, wriggling."""
+        trail = state['trail']
+        pts = []
+        idx = len(trail) - 1
+        carry = 0.0
+        prev = trail[idx]
+        tnow = state['time']
+        for i in range(len(beads)):
+            want = i * _WHIP_GAP
+            while idx > 0 and carry < want:
+                seg = math.dist(trail[idx], trail[idx - 1])
+                if carry + seg >= want:
+                    frac = (want - carry) / max(seg, 1e-6)
+                    prev = tuple(trail[idx][k] + (trail[idx - 1][k]
+                                 - trail[idx][k]) * frac for k in range(3))
+                    break
+                carry += seg
+                idx -= 1
+                prev = trail[idx]
+            # Side-to-side slither and a hump off the ground.
+            wave = math.sin(tnow * 10.0 - i * 0.7) * 0.18
+            pts.append((prev[0] + facing[2] * wave, prev[1] + 0.15
+                        + 0.08 * abs(math.sin(tnow * 8.0 - i * 0.5)),
+                        prev[2] - facing[0] * wave))
+        return pts
+
     def _step() -> None:
         state['time'] += _TICK
         tnow = state['time']
         phase = state['phase']
-        if phase == 'rise':
-            # Shoots up out of the ground, reaching for its victim.
-            grow = min(1.0, tnow / 0.25)
-            if target is not None and target.getdelegate(Spaz) is not None:
-                goal = target.position_center
+        if phase == 'crawl':
+            victim = target.getdelegate(Spaz) if target else None
+            homing = victim is not None and victim.is_alive()
+            goal = (_ground_under(target.position) if homing
+                    else straight_end)
+            move, dist = _norm([a - b for a, b in zip(goal, state['head'])])
+            step = WHIP_CRAWL_SPEED * _TICK
+            head = goal if dist <= step else tuple(
+                state['head'][k] + move[k] * step for k in range(3))
+            state['crawled'] += min(step, dist)
+            state['head'] = head
+            state['trail'].append(head)
+            if len(state['trail']) > 200:
+                state['trail'] = state['trail'][-200:]
+            # Grab whoever it reaches first (its target or anyone en route).
+            for vnode in _tentacle_targets(spaz, head):
+                if math.hypot(vnode.position[0] - head[0],
+                              vnode.position[2] - head[2]) < 1.0:
+                    _rear_up(vnode)
+                    break
             else:
-                goal = (base[0], base[1] + WHIP_HEIGHT, base[2])
+                if (not homing and dist <= step) or tnow > WHIP_CRAWL_TIME:
+                    _rear_up(None)
+            if state['phase'] == 'crawl':
+                try:
+                    _draw_tentacle(beads, _body_along_trail(), True)
+                except Exception:
+                    _BEADS_OK[0] = False
+                if int(tnow / _TICK) % 3 == 0:
+                    bs.emitfx(position=head, velocity=(0, 1, 0), count=2,
+                              scale=0.5, spread=0.15, chunk_type='slime')
+                    _snd('sticky_impact', 0.2, head)
+                return
+            phase = state['phase']
+        base = state['base']
+        if phase == 'rise':
+            grow = min(1.0, (tnow - state['rise_at']) / 0.25)
+            victim = state.get('rise_victim')
+            goal = (victim.position_center if victim
+                    else (base[0], base[1] + WHIP_HEIGHT, base[2]))
             tip = tuple(base[k] + (goal[k] - base[k]) * grow
                         for k in range(3))
             if grow >= 1.0:
-                victim = target if target is not None else None
-                if victim is None:
-                    for vnode in _tentacle_targets(spaz, base):
-                        if math.hypot(vnode.position[0] - base[0],
-                                      vnode.position[2] - base[2]) < 1.6:
-                            victim = vnode
-                            break
                 alive = victim.getdelegate(Spaz) if victim else None
                 if alive is not None and alive.is_alive():
                     _latch(victim)
@@ -1334,7 +1384,6 @@ def _fire_whip(spaz: Spaz) -> None:
             vnode = state['victim']
             vpos = vnode.position_center if vnode else (
                 base[0], base[1] + WHIP_HEIGHT * 0.6, base[2])
-            # Wrapped round them, swaying.
             tip = (vpos[0] + 0.25 * math.cos(tnow * 8.0), vpos[1] + 0.2,
                    vpos[2] + 0.25 * math.sin(tnow * 8.0))
             for mini, off in state['minis']:
@@ -1362,11 +1411,14 @@ def _fire_whip(spaz: Spaz) -> None:
             if frac >= 1.0:
                 _finish()
                 return
-        state['tip'] = tip
         amp = 0.35 if state['phase'] in ('rise', 'flail') else 0.15
         try:
-            pts = _whip_curve(base, tip, tnow * 12.0, amp, _WHIP_SEGMENTS)
+            pts = _whip_curve(base, tip, tnow * 12.0, amp, len(beads))
             _draw_tentacle(beads, pts, True)
+            if int(tnow / _TICK) % 3 == 0:  # Always visible, even w/o beads.
+                for pos in pts[::3]:
+                    bs.emitfx(position=pos, velocity=(0, 0, 0), count=1,
+                              scale=0.4, spread=0.02, chunk_type='slime')
         except Exception:
             _BEADS_OK[0] = False  # Visuals must never stop the whip.
 
