@@ -54,6 +54,9 @@ RELEASE_MULT = 1.0  # Множитель отдаваемого урона (1.0 
 # отброс, поэтому урон взрывов засчитывается в заряд с этим множителем.
 EXPLOSION_ABSORB_MULT = 2.0
 PUNCH_KNOCKBACK = 1.4  # Отброс заряженного кулака относительно обычного удара.
+PUNCH_SPARK_SPEED = 3.5  # Во сколько раз быстрее (и дальше) летят искры удара.
+SHOCKWAVE_RADIUS = 3.0  # Радиус ударной волны заряженного кулака (метров).
+SHOCKWAVE_PUSH = 400.0  # Сила, с которой волна отбрасывает всё вокруг.
 MAX_STORED = 3000  # Предел заряда (1000 = полное здоровье бойца).
 BOMB_RADIUS_MULT = 1.6  # Радиус бонусного взрыва относительно обычного.
 PLAYERS_ONLY = True  # Только игроки (боты щит не используют).
@@ -626,8 +629,8 @@ def _merge_bonus(victim: Spaz, msg: bs.HitMessage, bonus: float,
 
 def _release_punch_fx(spaz: Spaz, amount: float,
                       victim: bs.Node | None) -> None:
-    """Charged punch: particles shot clean through the target, with a
-    shock ring around the punch line (anime style)."""
+    """Charged punch: long streaks of sparks shot clean through the target,
+    and a shock wave around the punch line that shoves everything nearby."""
     node = spaz.node
     col = _color(spaz)
     ppos = node.punch_position
@@ -636,12 +639,12 @@ def _release_punch_fx(spaz: Spaz, amount: float,
     fwd = tuple(c / dlen for c in pdir) if dlen > 0.01 else (1.0, 0.0, 0.0)
     power = max(0.4, min(2.0, 0.5 + amount / 1000.0))
     center = victim.position_center if victim else ppos
+    fx, fy, fz = fwd
+    fast = PUNCH_SPARK_SPEED
 
     # Only a soft colored glint (no blinding flashes).
     _flash(center, _bright(col, 1.2), 0.4, 0.8, 1.0, 0.15)
 
-    # Sparks (the v1.4 look, ~2.5x denser), flashes stay dimmed.
-    fx, fy, fz = fwd
     # Shock bubbles chasing the fist forward: the "barrier" breaking.
     for i in range(3):
         step = 0.3 + 0.3 * i
@@ -655,35 +658,42 @@ def _release_punch_fx(spaz: Spaz, amount: float,
                 spread=(0.6 + 0.4 * i) * FX_STRENGTH * power,
             ),
         )
-    # Vapor cone thrown forward and out.
-    bs.emitfx(position=ppos, velocity=(fx * 9.0, fy * 9.0 + 1.0, fz * 9.0),
-              count=int(60 * power), scale=0.7, spread=0.45,
+    # Vapor cone thrown far forward.
+    bs.emitfx(position=ppos,
+              velocity=(fx * 9.0 * fast, fy * 9.0 * fast + 1.0,
+                        fz * 9.0 * fast),
+              count=int(60 * power), scale=0.7, spread=0.3,
               chunk_type='sweat')
     bs.emitfx(position=ppos, velocity=(fx * 4.0, fy * 4.0, fz * 4.0),
               count=3, emit_type='tendrils', tendril_type='thin_smoke')
-    # Sparks streaking ahead of the punch.
+    # Long streaks of sparks ahead of the punch.
     bs.emitfx(position=ppos,
-              velocity=(fx * 14.0, fy * 14.0 + 1.0, fz * 14.0),
-              count=int(75 * power), scale=0.9, spread=0.15,
+              velocity=(fx * 14.0 * fast, fy * 14.0 * fast + 1.0,
+                        fz * 14.0 * fast),
+              count=int(75 * power), scale=0.9, spread=0.1,
               chunk_type='spark')
-    _sparks(ppos, int(40 * power), vel=(fx * 4.0, 3.0, fz * 4.0), spread=0.6,
+    _sparks(ppos, int(40 * power),
+            vel=(fx * 4.0 * fast, 3.0, fz * 4.0 * fast), spread=0.4,
             scale=0.8)
     # Burst at the fist...
     _sparks(ppos, min(150, 50 + int(amount * 0.075)),
-            vel=(fx * 3.0, fy * 3.0 + 2.0, fz * 3.0), spread=0.5, scale=1.2)
-    # ...and out of the target's back.
+            vel=(fx * 3.0 * fast, fy * 3.0 * fast + 2.0, fz * 3.0 * fast),
+            spread=0.4, scale=1.2)
+    # ...and far out of the target's back.
     exit_pos = (center[0] + fx * 0.5, center[1] + fy * 0.5,
                 center[2] + fz * 0.5)
     bs.emitfx(position=exit_pos,
-              velocity=(fx * 12.0, fy * 12.0 + 1.5, fz * 12.0),
+              velocity=(fx * 12.0 * fast, fy * 12.0 * fast + 1.5,
+                        fz * 12.0 * fast),
               count=min(125, 40 + int(amount * 0.05)), scale=1.0,
-              spread=0.2, chunk_type='spark')
+              spread=0.12, chunk_type='spark')
     bs.emitfx(position=exit_pos,
-              velocity=(fx * 6.0, fy * 6.0 + 2.0, fz * 6.0),
+              velocity=(fx * 6.0 * fast, fy * 6.0 * fast + 2.0,
+                        fz * 6.0 * fast),
               count=min(75, 20 + int(amount * 0.04)), scale=0.8,
-              spread=0.3, chunk_type='sweat')
+              spread=0.2, chunk_type='sweat')
 
-    # Shock ring perpendicular to the punch: two waves, one after another.
+    # Shock wave around the punch line (perpendicular to it).
     up = (0.0, 1.0, 0.0)
     side = (fwd[1] * up[2] - fwd[2] * up[1], fwd[2] * up[0] - fwd[0] * up[2],
             fwd[0] * up[1] - fwd[1] * up[0])
@@ -693,30 +703,77 @@ def _release_punch_fx(spaz: Spaz, amount: float,
                side[2] * fwd[0] - side[0] * fwd[2],
                side[0] * fwd[1] - side[1] * fwd[0])
 
+    def _ring_dir(ang: float) -> tuple:
+        ca, sa = math.cos(ang), math.sin(ang)
+        return tuple(side[k] * ca + ring_up[k] * sa for k in range(3))
+
     def _shock_ring(speed: float, chunk: str, scale: float) -> None:
-        points = 28
+        points = 40
         for i in range(points):
-            ang = 2.0 * math.pi * i / points
-            ca, sa = math.cos(ang), math.sin(ang)
-            out = tuple(side[k] * ca + ring_up[k] * sa for k in range(3))
+            out = _ring_dir(2.0 * math.pi * i / points)
             bs.emitfx(
-                position=tuple(center[k] + out[k] * 0.2 for k in range(3)),
+                position=tuple(center[k] + out[k] * 0.25 for k in range(3)),
                 velocity=tuple(out[k] * speed for k in range(3)),
-                count=1, scale=scale, spread=0.02, chunk_type=chunk,
+                count=2, scale=scale, spread=0.02, chunk_type=chunk,
             )
 
-    _shock_ring(9.0 * power ** 0.5, 'spark', 0.7)
-    _shock_ring(6.0 * power ** 0.5, 'sweat', 0.9)
-    bs.timer(0.06, bs.CallStrict(_shock_ring, 13.0 * power ** 0.5, 'sweat',
-                                 0.7))
+    wave = power ** 0.5
+    _shock_ring(22.0 * wave, 'spark', 1.0)
+    _shock_ring(14.0 * wave, 'sweat', 1.2)
+    bs.timer(0.06, bs.CallStrict(_shock_ring, 28.0 * wave, 'sweat', 1.0))
+    # Shimmering air along the ring, and a strong pulse at its heart.
     bs.emitfx(position=center, emit_type='distortion',
-              spread=0.8 * FX_STRENGTH * power)
+              spread=1.6 * FX_STRENGTH * power)
+    for i in range(8):
+        out = _ring_dir(2.0 * math.pi * i / 8)
+        for dist, delay in ((0.8, 0.03), (1.6, 0.07)):
+            bs.timer(delay, bs.CallStrict(
+                bs.emitfx,
+                position=tuple(center[k] + out[k] * dist * power
+                               for k in range(3)),
+                emit_type='distortion', spread=0.5 * FX_STRENGTH,
+            ))
+    # The wave rolling out over the ground.
+    floor_pos = victim.position if victim else center
+    for delay, opacity in ((0.0, 0.5), (0.07, 0.3)):
+        ring = bs.newnode(
+            'locator',
+            attrs={
+                'shape': 'circleOutline',
+                'position': floor_pos,
+                'color': _bright(col, 1.0),
+                'opacity': 0.0,
+                'draw_beauty': False,
+                'additive': True,
+            },
+        )
+        size = SHOCKWAVE_RADIUS * 2.0 * (0.8 + 0.2 * power)
+        bs.animate_array(ring, 'size', 1,
+                         {0: [0.3], delay: [0.3], delay + 0.3: [size]})
+        bs.animate(ring, 'opacity',
+                   {0: 0.0, delay: opacity, delay + 0.3: 0.0})
+        bs.timer(delay + 0.35, ring.delete)
 
-    _shake(0.6 + 0.6 * power)
+    # And it physically shoves everything around the impact (no damage).
+    held = node.hold_node
+    for other in bs.getnodes():
+        if (not other or other == node or other == victim or other == held
+                or other.getnodetype() not in ('spaz', 'prop', 'bomb')):
+            continue
+        opos = other.position
+        away = [opos[k] - center[k] for k in range(3)]
+        dist = math.sqrt(sum(c * c for c in away))
+        if dist > SHOCKWAVE_RADIUS or dist < 0.01:
+            continue
+        away = [c / dist for c in away]
+        falloff = 1.0 - dist / SHOCKWAVE_RADIUS
+        _knock(other, center, away, SHOCKWAVE_PUSH * power * (0.4 + falloff))
+
+    _shake(0.8 + 0.8 * power)
     # The punch itself already plays the super-punch sound.
     _snd('big_impact', 1.0, center)
     _snd('punch_strong02', 1.0, center)
-    _snd('explosion02', 0.3, center)  # The boom.
+    _snd('explosion02', 0.45, center)  # The boom.
     _snd('swish', 0.9, center)
     _snd('orchestra_hit_big2', 0.6, center)
     if amount >= 600:
