@@ -22,12 +22,13 @@
     получает ледяные кулаки: каждый удар замораживает. Чем больше был заряд,
     тем дольше они держатся;
   * заряженная ледяная бомба, которую просто выкинули, вдобавок к морозной
-    волне щита (в 1.7 раза шире обычного взрыва) разбрасывает 3 ледяные
-    мини-бомбы, которые взрываются почти сразу после основной.
+    волне щита разбрасывает 3 ледяные мини-бомбы, которые взрываются одна за
+    другой вскоре после основной.
 
 Липкая бомба, заряжен:
-  брошенная заряженная липкая бомба ищет врага в радиусе 5 м от себя,
-  доворачивает к нему и прилипает (по дороге к полу не липнет).
+  брошенная заряженная липкая бомба, как только рядом (до 5 м) окажется
+  враг, выстреливает в него щупальцем из слизи и подтягивает к себе,
+  пока он не прилипнет.
 
 Работает и на «Счастливых мыслях»: направления и расстояния считаются в 3D.
 Мод нужен только хосту: в сетевой игре всё считается на сервере.
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
 
 IMPACT_SPEED = 22.0  # Скорость ударной бомбы после удара (м/с).
 IMPACT_FLIGHT_TIME = 4.0  # Сколько она ищет путь к врагу, потом взрывается.
+KICK_HITSTOP = 0.14  # Замирание бомбы после удара перед выстрелом (сек).
 IMPACT_RANGE = 25.0  # Дальность поиска врага для неё (метров).
 IMPACT_ANGLE = 45.0  # Насколько враг может быть в стороне от удара (градусов).
 ICE_FISTS_TIME = 8.0  # Ледяные кулаки: базовая длительность (сек)...
@@ -63,9 +65,10 @@ ICE_FISTS_PER_CHARGE = 0.01  # ...плюс секунд за каждую еди
 ICE_FISTS_MAX_TIME = 20.0  # ...но не дольше этого.
 ICE_FISTS_FREEZE = 3.0  # На сколько секунд замораживает удар ледяным кулаком.
 ICE_MINI_BOMBS = 3  # Сколько мини-бомб разбрасывает заряженная ледяная.
-MAGNET_RANGE = 5.0  # С какого расстояния заряженная липкая бомба тянется
-#                     к врагу (метров).
-MAGNET_SPEED = 14.0  # С какой скоростью она к нему летит (м/с).
+ICE_MINI_DELAY = 0.7  # Через сколько после основной взрывается первая...
+ICE_MINI_STAGGER = 0.2  # ...и с каким шагом остальные (сек).
+TENTACLE_RANGE = 5.0  # Дальность щупальца заряженной липкой бомбы (метров).
+TENTACLE_PULL = 90.0  # Сила, с которой щупальце подтягивает врага.
 FX_STRENGTH = 0.5  # Сила вспышек, света и тряски камеры (1.0 = максимум).
 FLASH_STRENGTH = 0.4  # Яркость и размер вспышек (1.0 = как в версии 1.5).
 
@@ -267,6 +270,40 @@ def _find_target(spaz: Spaz, origin: Sequence[float],
     return best
 
 
+def _shock_ring(center: Sequence[float], fwd: Sequence[float], speed: float,
+                chunk: str, scale: float, points: int = 24) -> None:
+    """Particles bursting out in a ring perpendicular to a direction."""
+    side, slen = _norm((-fwd[2], 0.0, fwd[0]))
+    if slen < 1e-4:
+        side = (1.0, 0.0, 0.0)
+    ring_up = (side[1] * fwd[2] - side[2] * fwd[1],
+               side[2] * fwd[0] - side[0] * fwd[2],
+               side[0] * fwd[1] - side[1] * fwd[0])
+    for i in range(points):
+        ang = 2.0 * math.pi * i / points
+        ca, sa = math.cos(ang), math.sin(ang)
+        out = tuple(side[k] * ca + ring_up[k] * sa for k in range(3))
+        bs.emitfx(position=tuple(center[k] + out[k] * 0.2 for k in range(3)),
+                  velocity=tuple(out[k] * speed for k in range(3)),
+                  count=1, scale=scale, spread=0.02, chunk_type=chunk)
+
+
+def _implode(center: Sequence[float], duration: float) -> None:
+    """Sparks rushing in from all around, arriving as the hit-stop ends."""
+    radius = 1.4
+    for i in range(18):
+        # Spread evenly over a sphere (golden-angle spiral).
+        yv = 1.0 - 2.0 * (i + 0.5) / 18
+        rad = math.sqrt(max(0.0, 1.0 - yv * yv))
+        ang = i * 2.39996
+        out = (math.cos(ang) * rad, yv, math.sin(ang) * rad)
+        bs.emitfx(
+            position=tuple(center[k] + out[k] * radius for k in range(3)),
+            velocity=tuple(-out[k] * radius / duration for k in range(3)),
+            count=1, scale=0.6, spread=0.0, chunk_type='spark',
+        )
+
+
 def _avoid_dirs(want: Sequence[float]) -> list[tuple[float, float, float]]:
     """Ways around an obstacle: over, under or past it on either side."""
     side, slen = _norm((-want[2], 0.0, want[0]))  # Horizontal perpendicular.
@@ -310,21 +347,40 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
     if _bomb_charge(bomb) <= 0:
         Spaz.bsm_charge_projectile(spaz, bomb)
 
-    ppos = node.punch_position
-    _flash(ppos, hot, 1.2, 2.0, 3.0, 0.25)
-    _ring(ppos, hot, 3.0, 0.25)
-    bs.emitfx(position=ppos, emit_type='distortion', spread=1.0 * FX_STRENGTH)
-    bs.emitfx(position=ppos,
-              velocity=(direction[0] * 14.0, direction[1] * 14.0 + 1.0,
-                        direction[2] * 14.0),
-              count=35, scale=0.9, spread=0.15, chunk_type='spark')
-    _shake(1.5)
-    _snd('super_punch', 1.0, ppos)
-    _snd('laser_reverse', 0.9, ppos)
-    _snd('swip2', 1.0, ppos)
-    _snd('orchestra_hit_big2', 0.7, ppos)
-    if target is not None:
-        _snd('activate_beep', 0.8, target.position)
+    # Hit-stop: the bomb freezes for a beat while energy rushes into it,
+    # then fires (see _release below). Never goes off while frozen.
+    final_levitate = bomb._bst_levitate  # type: ignore[attr-defined]
+    bomb._bst_levitate = True  # type: ignore[attr-defined]
+    bpos0 = bnode.position
+    _flash(node.punch_position, hot, 0.8, 1.2, 2.0, 0.15)
+    _implode(bpos0, KICK_HITSTOP)
+    bs.emitfx(position=bpos0, emit_type='distortion',
+              spread=0.6 * FX_STRENGTH)
+    _shake(0.6)
+    _snd('punch_strong02', 1.0, bpos0)
+    _snd('powerup01', 0.8, bpos0)
+    _snd('laser', 0.5, bpos0)
+
+    def _release(bpos: Sequence[float], fdir: Sequence[float]) -> None:
+        bomb._bst_levitate = final_levitate  # type: ignore[attr-defined]
+        _flash(bpos, hot, 1.0, 1.6, 2.5, 0.25)
+        _shock_ring(bpos, fdir, 10.0, 'spark', 0.7)
+        _shock_ring(bpos, fdir, 6.0, 'sweat', 0.9)
+        bs.timer(0.05, bs.CallStrict(_shock_ring, bpos, fdir, 14.0, 'sweat',
+                                     0.7))
+        bs.emitfx(position=bpos, emit_type='distortion',
+                  spread=1.2 * FX_STRENGTH)
+        # Exhaust kick backwards.
+        bs.emitfx(position=bpos, velocity=tuple(-c * 12.0 for c in fdir),
+                  count=30, scale=0.8, spread=0.15, chunk_type='spark')
+        _shake(1.6)
+        _snd('super_punch', 1.0, bpos)
+        _snd('big_impact', 1.0, bpos)
+        _snd('swip2', 1.0, bpos)
+        _snd('explosion02', 0.4, bpos)
+        _snd('orchestra_hit_big2', 0.7, bpos)
+        if target is not None:
+            _snd('activate_beep', 0.8, target.position)
 
     state: dict[str, Any] = {
         'time': 0.0,
@@ -334,6 +390,7 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
         'avoid_until': 0.0,
         'avoid_dir': direction,
         'attempt': 0,
+        'released': False,
     }
 
     def _stop() -> None:
@@ -341,11 +398,25 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
 
     def _step() -> None:
         state['time'] += _TICK
-        tnow = state['time']
         if not bnode or getattr(bomb, '_exploded', False):
             _stop()
             return
         bpos = bnode.position
+
+        # Hit-stop: hang in place, trembling.
+        if state['time'] < KICK_HITSTOP:
+            bnode.velocity = tuple(random.uniform(-0.4, 0.4)
+                                   for _ in range(3))
+            state['last'] = bpos
+            return
+        tnow = state['time'] - KICK_HITSTOP  # Flight time.
+        if not state['released']:
+            state['released'] = True
+            if target is not None:
+                state['dir'], _ = _norm(
+                    [a - b for a, b in zip(target.position_center, bpos)]
+                )
+            _release(bpos, state['dir'])
 
         if target is None:
             if tnow > 2.0:
@@ -388,9 +459,12 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
 
         state['last'] = bpos
         bnode.velocity = tuple(c * IMPACT_SPEED for c in fdir)
-        bs.emitfx(position=bpos, velocity=tuple(-c * 2.0 for c in fdir),
-                  count=3, scale=0.6, spread=0.1, chunk_type='spark')
-        if random.random() < 0.3:
+        # Blazing trail: sparks, a white vapor streak, shimmering air.
+        bs.emitfx(position=bpos, velocity=tuple(-c * 3.0 for c in fdir),
+                  count=4, scale=0.6, spread=0.1, chunk_type='spark')
+        bs.emitfx(position=bpos, velocity=tuple(-c * 4.0 for c in fdir),
+                  count=1, scale=0.7, spread=0.05, chunk_type='sweat')
+        if random.random() < 0.25:
             bs.emitfx(position=bpos, emit_type='distortion',
                       spread=0.4 * FX_STRENGTH)
 
@@ -405,75 +479,87 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
 # -------------------------- Sticky bomb + charge --------------------------
 
 
-def _set_sticky(bnode: bs.Node, value: bool) -> None:
-    try:
-        bnode.sticky = value
-    except Exception:
-        pass  # Not a sticky-capable node; homing still works.
+def _find_tentacle_target(spaz: Spaz, origin: Sequence[float]) -> Any:
+    best = None
+    for node in bs.getnodes():
+        if not node or node.getnodetype() != 'spaz':
+            continue
+        other = node.getdelegate(Spaz)
+        if other is None or not other.is_alive() or not _is_enemy(spaz, other):
+            continue
+        _, dist = _norm([a - b for a, b in zip(node.position_center, origin)])
+        if dist <= TENTACLE_RANGE and (best is None or dist < best[0]):
+            best = (dist, node)
+    return best[1] if best else None
 
 
-def _start_magnet(bomb: Bomb) -> None:
-    """Thrown charged sticky bomb: home in on an enemy within range."""
+def _start_tentacle(bomb: Bomb) -> None:
+    """Thrown charged sticky bomb: lash an enemy and reel them in."""
     bnode = bomb.node
     if not bnode or getattr(bomb, '_exploded', False):
         return
-    state: dict[str, Any] = {'time': 0.0, 'target': None}
+    state: dict[str, Any] = {'time': 0.0, 'target': None, 'latched': 0.0}
 
     def _stop() -> None:
-        bomb._bst_magnet_timer = None  # type: ignore[attr-defined]
-        if bnode:
-            _set_sticky(bnode, True)
+        bomb._bst_tentacle_timer = None  # type: ignore[attr-defined]
+
+    def _draw(bpos: Sequence[float], tpos: Sequence[float]) -> None:
+        """A wriggling rope of slime from the bomb to the victim."""
+        vec = [b - a for a, b in zip(bpos, tpos)]
+        side, slen = _norm((-vec[2], 0.0, vec[0]))
+        if slen < 1e-4:
+            side = (1.0, 0.0, 0.0)
+        segments = 7
+        phase = state['time'] * 14.0
+        for i in range(1, segments):
+            frac = i / segments
+            # Wave strongest mid-way, pinned at both ends.
+            wiggle = math.sin(phase + frac * 6.0) * 0.25 * math.sin(
+                frac * math.pi
+            )
+            pos = tuple(bpos[k] + vec[k] * frac + side[k] * wiggle
+                        for k in range(3))
+            bs.emitfx(position=pos, velocity=(0, 0, 0), count=1, scale=0.35,
+                      spread=0.0, chunk_type='slime')
 
     def _step() -> None:
         state['time'] += _TICK
-        spaz = bomb._bst_magnet()
-        if (
-            spaz is None
-            or not bnode
-            or getattr(bomb, '_exploded', False)
-        ):
+        spaz = bomb._bst_tentacle_owner()
+        if spaz is None or not bnode or getattr(bomb, '_exploded', False):
             _stop()
             return
         bpos = bnode.position
         target = state['target']
         victim = target.getdelegate(Spaz) if target else None
         if victim is None or not victim.is_alive():
-            state['target'] = target = None
-            # Look for the nearest enemy around the bomb.
-            best = None
-            for node in bs.getnodes():
-                if not node or node.getnodetype() != 'spaz':
-                    continue
-                other = node.getdelegate(Spaz)
-                if (
-                    other is None
-                    or not other.is_alive()
-                    or not _is_enemy(spaz, other)
-                ):
-                    continue
-                _, dist = _norm([a - b for a, b in zip(node.position_center,
-                                                       bpos)])
-                if dist <= MAGNET_RANGE and (best is None or dist < best[0]):
-                    best = (dist, node)
-            if best is None:
-                _set_sticky(bnode, True)
+            if state['latched']:
+                _stop()  # Our catch is gone; one lash per bomb.
                 return
-            state['target'] = target = best[1]
-            _set_sticky(bnode, False)  # Don't glue to the floor on the way.
-            _snd('activate_beep', 0.8, bpos)
-            _snd('sticky_impact', 0.6, bpos)
-        fdir, dist = _norm([a - b for a, b in zip(target.position_center,
-                                                  bpos)])
-        if dist < 0.8:
-            _set_sticky(bnode, True)  # Close enough: let it splat on.
-            bnode.velocity = tuple(c * MAGNET_SPEED * 0.5 for c in fdir)
+            target = _find_tentacle_target(spaz, bpos)
+            if target is None:
+                return
+            state['target'] = target
+            state['latched'] = state['time']
+            _snd('sticky_impact', 1.0, bpos)
+            _snd('splatter', 0.8, target.position)
+            _snd('swip', 0.8, bpos)
+            bs.emitfx(position=target.position_center, velocity=(0, 2, 0),
+                      count=12, scale=0.6, spread=0.3, chunk_type='slime')
+        tpos = target.position_center
+        pull, dist = _norm([a - b for a, b in zip(bpos, tpos)])
+        if dist < 0.9:
+            _stop()  # Reeled in: the bomb's own stickiness does the rest.
+            _snd('sticky_impact', 1.0, bpos)
             return
-        bnode.velocity = tuple(c * MAGNET_SPEED for c in fdir)
-        if random.random() < 0.4:
-            bs.emitfx(position=bpos, velocity=(0, 1, 0), count=2, scale=0.5,
-                      spread=0.1, chunk_type='slime')
+        target.handlemessage(
+            'impulse', tpos[0], tpos[1], tpos[2], 0.0, 0.0, 0.0,
+            TENTACLE_PULL, TENTACLE_PULL * 0.08, 0.0, 0,
+            pull[0], pull[1] + 0.15, pull[2],
+        )
+        if int(state['time'] / _TICK) % 2 == 0:
+            _draw(bpos, tpos)
 
-    bomb._bst_magnet_timer = bs.Timer(  # type: ignore[attr-defined]
+    bomb._bst_tentacle_timer = bs.Timer(  # type: ignore[attr-defined]
         _TICK, _step, repeat=True
     )
 
@@ -594,7 +680,7 @@ def _ice_burst(thrower: bs.Node | None, bomb: Bomb, blast: Blast) -> None:
             source_player=source,
             owner=thrower,
         ).autoretain()
-        bs.timer(0.35 + 0.1 * i,
+        bs.timer(ICE_MINI_DELAY + ICE_MINI_STAGGER * i,
                  bs.WeakCallStrict(mini.handlemessage, ExplodeMessage()))
 
 
@@ -659,8 +745,8 @@ def _patched_drop_bomb(self: Spaz) -> Bomb | None:
     charged = _charged(self)
     bomb = _orig_drop_bomb(self)
     if bomb is not None and bomb.bomb_type == 'sticky' and charged:
-        # Homes in on enemies once thrown (see _start_magnet).
-        bomb._bst_magnet = weakref.ref(self)  # type: ignore[attr-defined]
+        # Lashes out at enemies once thrown (see _start_tentacle).
+        bomb._bst_tentacle_owner = weakref.ref(self)  # type: ignore[attr-defined]
     if bomb is not None and bomb.bomb_type == 'ice' and charged:
         thrower = self.node
         bomb.add_explode_callback(
@@ -671,11 +757,11 @@ def _patched_drop_bomb(self: Spaz) -> Bomb | None:
 
 def _patched_bomb_handlemessage(self: Bomb, msg: Any) -> Any:
     result = _orig_bomb_handlemessage(self, msg)
-    if getattr(self, '_bst_magnet', None) is not None:
+    if getattr(self, '_bst_tentacle_owner', None) is not None:
         if isinstance(msg, bs.DroppedMessage):
-            _start_magnet(self)
+            _start_tentacle(self)
         elif isinstance(msg, bs.PickedUpMessage):
-            self._bst_magnet_timer = None  # type: ignore[attr-defined]
+            self._bst_tentacle_timer = None  # type: ignore[attr-defined]
     return result
 
 

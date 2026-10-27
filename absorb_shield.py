@@ -10,7 +10,7 @@
     или ледяной бомбе (плагины складываются друг с другом);
   * бомба — бомба светится и при взрыве бьёт всех вокруг накопленным уроном;
     заряженная ледяная бомба вдобавок пускает морозную волну, которая
-    замораживает всех в радиусе в 1.7 раза больше обычного взрыва.
+    замораживает всех в радиусе её взрыва.
 
 Кнопка щита («5-я кнопка»):
   * двойное нажатие «Схватить» (работает везде, в том числе на сенсорном
@@ -60,7 +60,7 @@ PLAYERS_ONLY = True  # Только игроки (боты щит не испо�
 SHOW_HINT = True  # Подсказка про щит в начале каждой игры.
 FX_STRENGTH = 0.5  # Сила вспышек, света и тряски камеры (1.0 = максимум).
 FLASH_STRENGTH = 0.4  # Яркость и размер вспышек (1.0 = как в версии 1.5).
-FROST_RADIUS_MULT = 1.7  # Радиус морозной волны: во столько раз больше
+FROST_RADIUS_MULT = 1.0  # Радиус морозной волны: во столько раз больше
 #                          радиуса взрыва заряженной ледяной бомбы.
 FROST_TIME = 5.0  # Сколько секунд держится заморозка от волны.
 FROST_WAVE_SPEED = 12.0  # Скорость фронта волны (метров в секунду).
@@ -642,7 +642,7 @@ def _release_punch_fx(spaz: Spaz, amount: float,
 
     # Shot through: a dense stream from the fist, through the body and
     # out of the back.
-    for along, speed in ((0.0, 14.0), (0.5, 17.0), (1.0, 20.0)):
+    for along, speed in ((0.0, 42.0), (0.5, 51.0), (1.0, 60.0)):
         start = (ppos[0] + (center[0] - ppos[0]) * along + fwd[0] * along * 0.5,
                  ppos[1] + (center[1] - ppos[1]) * along + fwd[1] * along * 0.5,
                  ppos[2] + (center[2] - ppos[2]) * along + fwd[2] * along * 0.5)
@@ -654,7 +654,7 @@ def _release_punch_fx(spaz: Spaz, amount: float,
     exit_pos = (center[0] + fwd[0] * 0.6, center[1] + fwd[1] * 0.6,
                 center[2] + fwd[2] * 0.6)
     bs.emitfx(position=exit_pos,
-              velocity=(fwd[0] * 10.0, fwd[1] * 10.0 + 0.5, fwd[2] * 10.0),
+              velocity=(fwd[0] * 30.0, fwd[1] * 30.0 + 0.5, fwd[2] * 30.0),
               count=int(20 * power), scale=0.8, spread=0.12,
               chunk_type='sweat')
 
