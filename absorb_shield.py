@@ -53,6 +53,7 @@ RELEASE_MULT = 1.0  # Множитель отдаваемого урона (1.0 
 # Взрывы в обычной игре ранят ещё и ударом о землю после отброса; щит гасит
 # отброс, поэтому урон взрывов засчитывается в заряд с этим множителем.
 EXPLOSION_ABSORB_MULT = 2.0
+PUNCH_KNOCKBACK = 1.4  # Отброс заряженного кулака относительно обычного удара.
 MAX_STORED = 3000  # Предел заряда (1000 = полное здоровье бойца).
 BOMB_RADIUS_MULT = 1.6  # Радиус бонусного взрыва относительно обычного.
 PLAYERS_ONLY = True  # Только игроки (боты щит не используют).
@@ -368,7 +369,8 @@ def _calc_damage(spaz: Spaz, msg: bs.HitMessage) -> float:
     return max(0.0, float(_DAMAGE_SCALE * spaz.node.damage))
 
 
-def _apply_impulse(spaz: Spaz, msg: bs.HitMessage) -> None:
+def _apply_impulse(spaz: Spaz, msg: bs.HitMessage,
+                   scale: float = 1.0) -> None:
     """Apply a hit's physical push (used when its damage goes in flat)."""
     fdir = msg.force_direction
     if fdir is None:
@@ -381,8 +383,8 @@ def _apply_impulse(spaz: Spaz, msg: bs.HitMessage) -> None:
         msg.velocity[0],
         msg.velocity[1],
         msg.velocity[2],
-        msg.magnitude * spaz.impact_scale,
-        msg.velocity_magnitude * spaz.impact_scale,
+        msg.magnitude * spaz.impact_scale * scale,
+        msg.velocity_magnitude * spaz.impact_scale * scale,
         msg.radius,
         0,
         fdir[0],
@@ -610,104 +612,88 @@ def _merge_bonus(victim: Spaz, msg: bs.HitMessage, bonus: float,
     shielded = victim.shield is not None or getattr(victim, '_ab_active', False)
     total = _calc_damage(victim, msg) + bonus
     if not shielded:
-        # Flat damage skips the hit's own push; apply it, plus ours.
-        _apply_impulse(victim, msg)
-        _knock(victim.node, pos, fdir, bonus)
+        # Flat damage skips the hit's own push, so apply it ourselves.
+        if msg.hit_type == 'punch':
+            # A charged punch shoves a bit harder than a normal one.
+            _apply_impulse(victim, msg, PUNCH_KNOCKBACK)
+        else:
+            _apply_impulse(victim, msg)
+            _knock(victim.node, pos, fdir, bonus)
     msg.flat_damage = total / max(victim.impact_scale, 0.01)
-
-
-def _sonic_boom(pos: Sequence[float], direction: Sequence[float],
-                color: Sequence[float], power: float) -> None:
-    """A fist breaking the sound barrier: shock rings, vapor cone, sparks."""
-    dlen = math.sqrt(sum(c * c for c in direction))
-    if dlen < 0.01:
-        direction, dlen = (1.0, 0.0, 0.0), 1.0
-    fx, fy, fz = (c / dlen for c in direction)
-    power = max(0.3, min(2.0, power))
-
-    # White-hot core and a short colored bloom.
-    _flash(pos, (1.6, 1.6, 1.6), 0.5, 0.0, 0.0, 0.05)
-    _flash(pos, _bright(color, 2.0), 0.9, 1.6, 2.5, 0.2)
-
-    # Shock bubbles chasing the fist forward: the "barrier" breaking.
-    for i in range(3):
-        step = 0.3 + 0.3 * i
-        bs.timer(
-            0.025 * i,
-            bs.CallStrict(
-                bs.emitfx,
-                position=(pos[0] + fx * step, pos[1] + fy * step,
-                          pos[2] + fz * step),
-                emit_type='distortion',
-                spread=(0.6 + 0.4 * i) * FX_STRENGTH * power,
-            ),
-        )
-
-    # Vapor cone: white mist thrown forward and out.
-    bs.emitfx(position=pos, velocity=(fx * 9.0, fy * 9.0 + 1.0, fz * 9.0),
-              count=int(25 * power), scale=0.7, spread=0.45,
-              chunk_type='sweat')
-    bs.emitfx(position=pos, velocity=(fx * 4.0, fy * 4.0, fz * 4.0),
-              count=2, emit_type='tendrils', tendril_type='thin_smoke')
-
-    # Sparks streaking ahead of the punch.
-    bs.emitfx(position=pos, velocity=(fx * 14.0, fy * 14.0 + 1.0, fz * 14.0),
-              count=int(30 * power), scale=0.9, spread=0.15,
-              chunk_type='spark')
-    _sparks(pos, int(15 * power), vel=(fx * 4.0, 3.0, fz * 4.0), spread=0.6,
-            scale=0.8)
-
-    _shake(0.8 + power)
-    _snd('big_impact', 1.0, pos)
-    _snd('explosion02', 0.35, pos)  # The boom.
-    _snd('swish', 1.0, pos)
 
 
 def _release_punch_fx(spaz: Spaz, amount: float,
                       victim: bs.Node | None) -> None:
+    """Charged punch: particles shot clean through the target, with a
+    shock ring around the punch line (anime style)."""
     node = spaz.node
     col = _color(spaz)
-    hot = _bright(col, 2.0)
     ppos = node.punch_position
     pdir = node.punch_velocity
-    dlen = math.sqrt(sum(c * c for c in pdir)) or 1.0
-    fwd = tuple(c / dlen for c in pdir)
+    dlen = math.sqrt(sum(c * c for c in pdir))
+    fwd = tuple(c / dlen for c in pdir) if dlen > 0.01 else (1.0, 0.0, 0.0)
+    power = max(0.4, min(2.0, 0.5 + amount / 1000.0))
+    center = victim.position_center if victim else ppos
 
-    _sonic_boom(ppos, pdir, col, 0.5 + amount / 1000.0)
+    # Only a soft colored glint (no blinding flashes).
+    _flash(center, _bright(col, 1.2), 0.4, 0.8, 1.0, 0.15)
 
-    # Particles shooting through the target: colored burst at the fist...
-    expl = bs.newnode(
-        'explosion',
-        attrs={'position': ppos,
-               'radius': (0.5 + min(0.8, amount / 1500.0)) * FX_STRENGTH,
-               'color': col},
-    )
-    bs.timer(1.0, expl.delete)
-    _flash(ppos, hot, 1.0, 2.5, 3.0, 0.35)
-    _ring(ppos, hot, 3.5, 0.3)
-    _sparks(ppos, min(60, 20 + int(amount * 0.03)),
-            vel=(fwd[0] * 3.0, fwd[1] * 3.0 + 2.0, fwd[2] * 3.0),
-            spread=0.5, scale=1.2)
-    # ...and out of their back.
-    if victim:
-        vpos = victim.position_center
-        exit_pos = (vpos[0] + fwd[0] * 0.5, vpos[1] + fwd[1] * 0.5,
-                    vpos[2] + fwd[2] * 0.5)
-        bs.emitfx(position=exit_pos,
-                  velocity=(fwd[0] * 12.0, fwd[1] * 12.0 + 1.5,
-                            fwd[2] * 12.0),
-                  count=min(50, 15 + int(amount * 0.02)), scale=1.0,
-                  spread=0.2, chunk_type='spark')
-        bs.emitfx(position=exit_pos,
-                  velocity=(fwd[0] * 6.0, fwd[1] * 6.0 + 2.0, fwd[2] * 6.0),
-                  count=min(30, 8 + int(amount * 0.015)), scale=0.8,
-                  spread=0.3, chunk_type='sweat')
+    # Shot through: a dense stream from the fist, through the body and
+    # out of the back.
+    for along, speed in ((0.0, 14.0), (0.5, 17.0), (1.0, 20.0)):
+        start = (ppos[0] + (center[0] - ppos[0]) * along + fwd[0] * along * 0.5,
+                 ppos[1] + (center[1] - ppos[1]) * along + fwd[1] * along * 0.5,
+                 ppos[2] + (center[2] - ppos[2]) * along + fwd[2] * along * 0.5)
+        bs.emitfx(position=start,
+                  velocity=(fwd[0] * speed, fwd[1] * speed + 0.5,
+                            fwd[2] * speed),
+                  count=int(25 * power), scale=0.7, spread=0.08,
+                  chunk_type='spark')
+    exit_pos = (center[0] + fwd[0] * 0.6, center[1] + fwd[1] * 0.6,
+                center[2] + fwd[2] * 0.6)
+    bs.emitfx(position=exit_pos,
+              velocity=(fwd[0] * 10.0, fwd[1] * 10.0 + 0.5, fwd[2] * 10.0),
+              count=int(20 * power), scale=0.8, spread=0.12,
+              chunk_type='sweat')
 
+    # Shock ring perpendicular to the punch: two waves, one after another.
+    up = (0.0, 1.0, 0.0)
+    side = (fwd[1] * up[2] - fwd[2] * up[1], fwd[2] * up[0] - fwd[0] * up[2],
+            fwd[0] * up[1] - fwd[1] * up[0])
+    slen = math.sqrt(sum(c * c for c in side))
+    side = tuple(c / slen for c in side) if slen > 0.01 else (1.0, 0.0, 0.0)
+    ring_up = (side[1] * fwd[2] - side[2] * fwd[1],
+               side[2] * fwd[0] - side[0] * fwd[2],
+               side[0] * fwd[1] - side[1] * fwd[0])
+
+    def _shock_ring(speed: float, chunk: str, scale: float) -> None:
+        points = 28
+        for i in range(points):
+            ang = 2.0 * math.pi * i / points
+            ca, sa = math.cos(ang), math.sin(ang)
+            out = tuple(side[k] * ca + ring_up[k] * sa for k in range(3))
+            bs.emitfx(
+                position=tuple(center[k] + out[k] * 0.2 for k in range(3)),
+                velocity=tuple(out[k] * speed for k in range(3)),
+                count=1, scale=scale, spread=0.02, chunk_type=chunk,
+            )
+
+    _shock_ring(9.0 * power ** 0.5, 'spark', 0.7)
+    _shock_ring(6.0 * power ** 0.5, 'sweat', 0.9)
+    bs.timer(0.06, bs.CallStrict(_shock_ring, 13.0 * power ** 0.5, 'sweat',
+                                 0.7))
+    bs.emitfx(position=center, emit_type='distortion',
+              spread=0.8 * FX_STRENGTH * power)
+
+    _shake(0.6 + 0.6 * power)
     # The punch itself already plays the super-punch sound.
-    _snd('orchestra_hit_big2', 0.7, ppos)
-    _snd('punch_strong02', 1.0, ppos)
+    _snd('big_impact', 1.0, center)
+    _snd('punch_strong02', 1.0, center)
+    _snd('explosion02', 0.3, center)  # The boom.
+    _snd('swish', 0.9, center)
+    _snd('orchestra_hit_big2', 0.6, center)
     if amount >= 600:
-        _snd('cymbal', 0.5, ppos)
+        _snd('cymbal', 0.4, center)
 
 
 def _freeze_node(target: bs.Node) -> None:
