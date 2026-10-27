@@ -17,9 +17,10 @@
     касании врага, заряд уходит в её взрыв. Если впереди никого нет — летит
     прямо и взрывается обо что угодно;
   * пинг-понг: цель может отбить летящую в неё бомбу любым ударом — та,
-    как мячик, летит обратно в пославшего, и теперь отбить может уже он.
-    Так её можно гонять туда-обратно (каждый раз чуть быстрее), пока
-    кто-нибудь не пропустит.
+    как мячик, летит обратно в пославшего (плавно, по лёгкой спирали, в
+    искрах), и теперь отбить может уже он. Так её можно гонять
+    туда-обратно (она разгоняется), пока кто-нибудь не пропустит; после
+    двух отбиваний попадание — мощный направленный взрыв конусом 50°.
 
 Обычная бомба, заряжен:
   удар кулаком по своей летящей бомбе — она превращается в 4 мини-снаряда
@@ -93,7 +94,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.14'
+BSM_VERSION = '2.15'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -105,6 +106,13 @@ DEFLECT_SPEEDUP = 1.05  # ...и чуть-чуть при каждом отбив
 DEFLECT_MAX_SPEED = 44.0  # ...но не быстрее этого (м/с).
 PANDA_SPEED = 30.0  # С этой скорости отбивание — «внутренний покой» (раз).
 PANDA_TIME = 0.7  # Сколько бомба кружит вокруг отбивающего (сек).
+PINGPONG_TURN = 5.0  # Как резко отбитая бомба доворачивает (рад/с) — плавно.
+SPIRAL_RADIUS = 0.25  # Лёгкая равномерная спираль в полёте (метров)...
+SPIRAL_RATE = 10.0  # ...и её скорость вращения (рад/с).
+CONE_AFTER_DEFLECTS = 2  # После стольких отбиваний попадание — конусный взрыв.
+CONE_ANGLE = 50.0  # Ширина конуса взрыва (градусов).
+CONE_LENGTH = 7.0  # Длина конуса (метров).
+CONE_DAMAGE = 900.0  # Урон в конусе вплотную (+ заряд бомбы), к концу слабее.
 SHOT_COUNT = 6  # Сколько мини-снарядов даёт отбитая заряженная бомба.
 SHOT_MAX = 12  # Сколько снарядов можно носить.
 SHOT_SPEED = 20.0  # Скорость снаряда (м/с).
@@ -497,29 +505,7 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
             want, _ = _norm((tpos[0] - bpos[0], tpos[1] + 0.25 - bpos[1],
                              tpos[2] - bpos[2]))
             if state.get('pingpong'):
-                # Knocked back: dead straight at them, no smoothing (that's
-                # what made it weave at speed). Only if it's truly stuck
-                # against something does it hop over/around for a moment.
-                _, moved = _norm([a - b for a, b in zip(bpos, state['last'])])
-                if tnow > 0.1 and moved < speed * _TICK * 0.35:
-                    state['slow'] += 1
-                else:
-                    state['slow'] = 0
-                if state['slow'] >= 4 and tnow >= state['avoid_until']:
-                    dirs = _avoid_dirs(want)
-                    state['avoid_dir'] = dirs[state['attempt'] % len(dirs)]
-                    state['attempt'] += 1
-                    state['avoid_until'] = tnow + 0.12
-                    state['slow'] = 0
-                fdir = (state['avoid_dir'] if tnow < state['avoid_until']
-                        else want)
-                state['dir'] = fdir
-                state['last'] = bpos
-                state['vel'] = tuple(c * speed for c in fdir)
-                bnode.velocity = state['vel']
-                bs.emitfx(position=bpos,
-                          velocity=tuple(-c * 2.0 for c in fdir), count=3,
-                          scale=0.6, spread=0.08, chunk_type='spark')
+                _pingpong_fly(bomb, bnode, state, want, speed)
                 return
 
             # Truly stuck (barely moving for a while)? Try going over,
@@ -587,6 +573,7 @@ def _deflect_homing(spaz: Spaz, bomb: Bomb) -> None:
         'avoid_until': 0.0,
         'attempt': 0,
         'pingpong': True,
+        'deflects': state.get('deflects', 0) + 1,
     })
     # The deflector is now the one it won't go off on, and gets the credit.
     bomb.owner = node
@@ -601,13 +588,153 @@ def _deflect_homing(spaz: Spaz, bomb: Bomb) -> None:
 
     ppos = node.punch_position
     _flash(ppos, _bright(_color(spaz), 2.0), 0.6, 1.0, 1.5, 0.15)
-    bs.emitfx(position=bpos, velocity=tuple(c * 8.0 for c in heading),
-              count=20, scale=0.8, spread=0.25, chunk_type='spark')
+    # A clean, showy return: sparks fanned along the new heading and a ring
+    # of them around it, the air rippling.
+    bs.emitfx(position=bpos, velocity=tuple(c * 12.0 for c in heading),
+              count=30, scale=1.0, spread=0.15, chunk_type='spark')
+    side, up = _perp_basis(heading)
+    for i in range(16):
+        ang = 2.0 * math.pi * i / 16
+        out = tuple(side[k] * math.cos(ang) + up[k] * math.sin(ang)
+                    for k in range(3))
+        bs.emitfx(position=bpos,
+                  velocity=tuple(out[k] * 7.0 + heading[k] * 2.0
+                                 for k in range(3)),
+                  count=1, scale=0.8, spread=0.0, chunk_type='spark')
+    bs.emitfx(position=bpos, emit_type='distortion', spread=0.8)
     _shake(0.8)
     _seq(bpos, (0, 'punch_strong01', 1.0), (0, 'impact_hard', 0.8),
          (0.02, 'swip2', 0.9))
     if back_to is not None:
         _snd('activate_beep', 0.8, back_to.position)
+
+
+def _turn_toward(cur: Sequence[float], want: Sequence[float],
+                 max_angle: float) -> tuple[float, float, float]:
+    """Rotate a heading toward another by at most max_angle radians."""
+    cos = max(-1.0, min(1.0, sum(a * b for a, b in zip(cur, want))))
+    angle = math.acos(cos)
+    if angle <= max_angle:
+        return tuple(want)
+    frac = max_angle / angle
+    return _norm([a + (b - a) * frac for a, b in zip(cur, want)])[0]
+
+
+def _perp_basis(fwd: Sequence[float]) -> tuple[tuple, tuple]:
+    side, slen = _norm((-fwd[2], 0.0, fwd[0]))
+    if slen < 1e-4:
+        side = (1.0, 0.0, 0.0)
+    up = (side[1] * fwd[2] - side[2] * fwd[1],
+          side[2] * fwd[0] - side[0] * fwd[2],
+          side[0] * fwd[1] - side[1] * fwd[0])
+    return side, up
+
+
+def _pingpong_fly(bomb: Bomb, bnode: bs.Node, state: dict,
+                  want: Sequence[float], speed: float) -> None:
+    """A knocked-back ball: smooth turns only, a gentle even spiral, big
+    sparks. Bumping into floors/walls just eases it upward."""
+    heading = _turn_toward(state['dir'], want, PINGPONG_TURN * _TICK)
+    if bs.time() - getattr(bomb, '_bst_bump_time', -9.0) < 0.15:
+        climb, _ = _norm((heading[0], heading[1] + 0.8, heading[2]))
+        heading = _turn_toward(heading, climb, PINGPONG_TURN * _TICK)
+    state['dir'] = heading
+    state['spin'] = state.get('spin', 0.0) + SPIRAL_RATE * _TICK
+    side, up = _perp_basis(heading)
+    ca, sa = math.cos(state['spin']), math.sin(state['spin'])
+    swirl = SPIRAL_RADIUS * SPIRAL_RATE
+    vel = tuple(heading[k] * speed + (side[k] * -sa + up[k] * ca) * swirl
+                for k in range(3))
+    state['vel'] = vel
+    state['last'] = bnode.position
+    bnode.velocity = vel
+    bpos = bnode.position
+    bs.emitfx(position=bpos, velocity=tuple(-c * 3.0 for c in heading),
+              count=4, scale=1.0, spread=0.12, chunk_type='spark')
+    if int(state['spin'] * 3) % 2 == 0:
+        bs.emitfx(position=bpos, velocity=(0, 0.5, 0), count=1, scale=0.7,
+                  spread=0.05, chunk_type='sweat')
+
+
+def _cone_blast(bomb: Bomb) -> None:
+    """A ball that's been knocked back and forth goes off as a powerful
+    blast cone in the direction it flew, at whoever failed to return it."""
+    bomb._exploded = True  # pylint: disable=protected-access
+    bomb._bst_flight = None  # type: ignore[attr-defined]
+    bnode = bomb.node
+    if not bnode:
+        return
+    state = bomb._bst_homing  # type: ignore[attr-defined]
+    pos = bnode.position
+    fwd, flen = _norm(state.get('dir', (1.0, 0.0, 0.0)))
+    if flen < 1e-4:
+        fwd = (1.0, 0.0, 0.0)
+    damage = CONE_DAMAGE + _bomb_charge(bomb)
+    min_cos = math.cos(math.radians(CONE_ANGLE / 2.0))
+    source = bomb.get_source_player(bs.Player)
+    sender = state.get('sender')
+    for other in bs.getnodes():
+        if (not other or other == sender
+                or other.getnodetype() not in ('spaz', 'prop', 'bomb')
+                or other == bnode):
+            continue
+        opos = (other.position_center if other.getnodetype() == 'spaz'
+                else other.position)
+        to, dist = _norm([a - b for a, b in zip(opos, pos)])
+        inside = dist < 0.8 or (
+            dist <= CONE_LENGTH
+            and sum(a * b for a, b in zip(to, fwd)) >= min_cos)
+        if not inside:
+            continue
+        power = 1.0 - 0.5 * min(1.0, dist / CONE_LENGTH)
+        push = fwd if dist < 0.8 else to
+        other.handlemessage(
+            'impulse', opos[0], opos[1], opos[2], 0.0, 0.0, 0.0,
+            1800.0 * power, 120.0 * power, 0.0, 0,
+            push[0], push[1] + 0.35, push[2],
+        )
+        if other.getnodetype() == 'spaz':
+            other.handlemessage(
+                bs.HitMessage(
+                    pos=opos,
+                    source_player=bs.existing(source),
+                    force_direction=push,
+                    flat_damage=damage * power,
+                    hit_type='explosion',
+                    hit_subtype='normal',
+                )
+            )
+    # Fire rolling down the cone, growing as it goes.
+    for i in range(6):
+        along = 0.4 + i * CONE_LENGTH / 6.0
+        bs.timer(0.025 * i, bs.CallStrict(
+            _cone_fire, tuple(pos[k] + fwd[k] * along for k in range(3)),
+            0.5 + 0.22 * i))
+    side, up = _perp_basis(fwd)
+    spread = math.tan(math.radians(CONE_ANGLE / 2.0))
+    for _ in range(14):
+        ang = random.uniform(0.0, 2.0 * math.pi)
+        rad = random.uniform(0.0, spread)
+        ray = _norm([fwd[k] + (side[k] * math.cos(ang) + up[k]
+                               * math.sin(ang)) * rad for k in range(3)])[0]
+        bs.emitfx(position=pos, velocity=tuple(c * 22.0 for c in ray),
+                  count=6, scale=1.1, spread=0.05, chunk_type='spark')
+    bs.emitfx(position=pos, emit_type='distortion', spread=2.0)
+    scorch = bs.newnode('scorch', attrs={'position': pos, 'size': 1.2,
+                                         'big': False})
+    bs.animate(scorch, 'presence', {3.0: 1.0, 10.0: 0.0})
+    bs.timer(10.0, scorch.delete)
+    _shake(3.0)
+    _seq(pos, (0, 'explosion01', 1.0), (0, 'big_impact', 1.0),
+         (0.03, 'explosion03', 0.9), (0.05, 'orchestra_hit_big1', 0.9),
+         (0.08, 'big_impact2', 0.8), (0.12, 'gong', 0.6),
+         (0.2, 'debris_fall', 0.6))
+    bomb.handlemessage(bs.DieMessage())
+
+
+def _cone_fire(pos: Sequence[float], radius: float) -> None:
+    expl = bs.newnode('explosion', attrs={'position': pos, 'radius': radius})
+    bs.timer(1.0, expl.delete)
 
 
 def _start_panda(spaz: Spaz, bomb: Bomb, state: dict) -> None:
@@ -672,13 +799,20 @@ def _panda_step(bomb: Bomb, state: dict) -> None:
         return
     # One flowing circle around them, rising and falling like a wave.
     center = node.position_center
-    panda['ang'] += 2.0 * math.pi * _TICK / PANDA_TIME
+    rate = 2.0 * math.pi / PANDA_TIME
+    panda['ang'] += rate * _TICK
     ang = panda['ang']
     goal = (center[0] + math.cos(ang) * 1.4,
             center[1] + 0.3 + 0.4 * math.sin(ang * 2.0),
             center[2] + math.sin(ang) * 1.4)
+    # Ride the circle smoothly: its own tangent speed plus a soft pull
+    # back onto it.
+    tangent = (-math.sin(ang) * 1.4 * rate,
+               0.8 * math.cos(ang * 2.0) * rate,
+               math.cos(ang) * 1.4 * rate)
     bpos = bnode.position
-    bnode.velocity = tuple((g - p) * 12.0 for g, p in zip(goal, bpos))
+    bnode.velocity = tuple(t + (g - p) * 4.0
+                           for t, g, p in zip(tangent, goal, bpos))
     # A flowing ribbon behind it.
     bs.emitfx(position=bpos, velocity=(0, 0.3, 0), count=2, scale=0.7,
               spread=0.05, chunk_type='sweat')
@@ -2074,6 +2208,15 @@ def _patched_set_land_mine_count(self: Spaz, count: int) -> None:
 def _patched_bomb_handlemessage(self: Bomb, msg: Any) -> Any:
     if isinstance(msg, ExplodeMessage) and getattr(self, '_bst_shell', False):
         _shell_pop(self)
+        return None
+    homing = getattr(self, '_bst_homing', None)
+    if (
+        isinstance(msg, ExplodeMessage)
+        and homing is not None
+        and homing.get('deflects', 0) >= CONE_AFTER_DEFLECTS
+        and not getattr(self, '_exploded', False)
+    ):
+        _cone_blast(self)
         return None
     result = _orig_bomb_handlemessage(self, msg)
     if isinstance(msg, ArmMessage) and getattr(self, '_bst_mine_spread', False):
