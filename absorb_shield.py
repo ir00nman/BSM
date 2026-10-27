@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.6'
+BSM_VERSION = '2.7'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -641,24 +641,30 @@ def _merge_bonus(victim: Spaz, msg: bs.HitMessage, bonus: float,
 
 def _release_punch_fx(spaz: Spaz, amount: float,
                       victim: bs.Node | None) -> None:
-    """Charged punch: long streaks of sparks shot clean through the target,
-    and a shock wave around the punch line that shoves everything nearby."""
+    """Charged punch: sparks shot clean through the target and a shock wave
+    around the punch line. Everything grows with the charge (1000 = 100%):
+    more and farther sparks, more rings, a scorch mark and flying rocks
+    from 100%, a second giant wave from 200%."""
     node = spaz.node
     col = _color(spaz)
     ppos = node.punch_position
     pdir = node.punch_velocity
     dlen = math.sqrt(sum(c * c for c in pdir))
     fwd = tuple(c / dlen for c in pdir) if dlen > 0.01 else (1.0, 0.0, 0.0)
-    power = max(0.4, min(2.0, 0.5 + amount / 1000.0))
+    level = max(0.15, min(3.0, amount / 1000.0))  # 1.0 = 100% charge.
+    power = 0.5 + 0.5 * level
+    many = 0.5 + 0.5 * level  # Particle counts.
     center = victim.position_center if victim else ppos
     fx, fy, fz = fwd
-    fast = PUNCH_SPARK_SPEED
+    fast = PUNCH_SPARK_SPEED * (0.7 + 0.3 * min(level, 2.0))
 
     # Only a soft colored glint (no blinding flashes).
-    _flash(center, _bright(col, 1.2), 0.4, 0.8, 1.0, 0.15)
+    _flash(center, _bright(col, 1.2), 0.3 + 0.2 * level, 0.6 + 0.3 * level,
+           0.8 + 0.4 * level, 0.15)
 
     # Shock bubbles chasing the fist forward: the "barrier" breaking.
-    for i in range(3):
+    bubbles = 2 + int(min(level, 2.0))
+    for i in range(bubbles):
         step = 0.3 + 0.3 * i
         bs.timer(
             0.025 * i,
@@ -674,21 +680,22 @@ def _release_punch_fx(spaz: Spaz, amount: float,
     bs.emitfx(position=ppos,
               velocity=(fx * 9.0 * fast, fy * 9.0 * fast + 1.0,
                         fz * 9.0 * fast),
-              count=int(60 * power), scale=0.7, spread=0.3,
+              count=int(60 * many), scale=0.7, spread=0.3,
               chunk_type='sweat')
     bs.emitfx(position=ppos, velocity=(fx * 4.0, fy * 4.0, fz * 4.0),
-              count=3, emit_type='tendrils', tendril_type='thin_smoke')
+              count=1 + int(2 * level), emit_type='tendrils',
+              tendril_type='thin_smoke')
     # Long streaks of sparks ahead of the punch.
     bs.emitfx(position=ppos,
               velocity=(fx * 14.0 * fast, fy * 14.0 * fast + 1.0,
                         fz * 14.0 * fast),
-              count=int(75 * power), scale=0.9, spread=0.1,
+              count=int(75 * many), scale=0.9, spread=0.1,
               chunk_type='spark')
-    _sparks(ppos, int(40 * power),
+    _sparks(ppos, int(40 * many),
             vel=(fx * 4.0 * fast, 3.0, fz * 4.0 * fast), spread=0.4,
             scale=0.8)
     # Burst at the fist...
-    _sparks(ppos, min(150, 50 + int(amount * 0.075)),
+    _sparks(ppos, min(200, int((50 + amount * 0.075) * many)),
             vel=(fx * 3.0 * fast, fy * 3.0 * fast + 2.0, fz * 3.0 * fast),
             spread=0.4, scale=1.2)
     # ...and far out of the target's back.
@@ -697,12 +704,12 @@ def _release_punch_fx(spaz: Spaz, amount: float,
     bs.emitfx(position=exit_pos,
               velocity=(fx * 12.0 * fast, fy * 12.0 * fast + 1.5,
                         fz * 12.0 * fast),
-              count=min(125, 40 + int(amount * 0.05)), scale=1.0,
+              count=min(180, int((40 + amount * 0.05) * many)), scale=1.0,
               spread=0.12, chunk_type='spark')
     bs.emitfx(position=exit_pos,
               velocity=(fx * 6.0 * fast, fy * 6.0 * fast + 2.0,
                         fz * 6.0 * fast),
-              count=min(75, 20 + int(amount * 0.04)), scale=0.8,
+              count=min(110, int((20 + amount * 0.04) * many)), scale=0.8,
               spread=0.2, chunk_type='sweat')
 
     # Shock wave around the punch line (perpendicular to it).
@@ -730,15 +737,23 @@ def _release_punch_fx(spaz: Spaz, amount: float,
             )
 
     wave = power ** 0.5
+    rings = 1 if level < 0.5 else 2 if level < 1.0 else 3
     _shock_ring(22.0 * wave, 'spark', 1.0)
-    _shock_ring(14.0 * wave, 'sweat', 1.2)
-    bs.timer(0.06, bs.CallStrict(_shock_ring, 28.0 * wave, 'sweat', 1.0))
-    # Shimmering air along the ring, and a strong pulse at its heart.
+    if rings >= 2:
+        _shock_ring(14.0 * wave, 'sweat', 1.2)
+    if rings >= 3:
+        bs.timer(0.06, bs.CallStrict(_shock_ring, 28.0 * wave, 'sweat', 1.0))
+    if level >= 2.0:  # A second, giant wave.
+        bs.timer(0.14, bs.CallStrict(_shock_ring, 38.0 * wave, 'spark', 1.2))
+        bs.timer(0.14, bs.CallStrict(
+            bs.emitfx, position=center, emit_type='distortion',
+            spread=3.0 * FX_STRENGTH))
+    # Shimmering air along the ring, and a pulse at its heart.
     bs.emitfx(position=center, emit_type='distortion',
               spread=1.6 * FX_STRENGTH * power)
     for i in range(8):
         out = _ring_dir(2.0 * math.pi * i / 8)
-        for dist, delay in ((0.8, 0.03), (1.6, 0.07)):
+        for dist, delay in ((0.8, 0.03), (1.6, 0.07))[:rings]:
             bs.timer(delay, bs.CallStrict(
                 bs.emitfx,
                 position=tuple(center[k] + out[k] * dist * power
@@ -747,7 +762,8 @@ def _release_punch_fx(spaz: Spaz, amount: float,
             ))
     # The wave rolling out over the ground.
     floor_pos = victim.position if victim else center
-    for delay, opacity in ((0.0, 0.5), (0.07, 0.3)):
+    shock_radius = SHOCKWAVE_RADIUS * (0.5 + 0.5 * min(level, 2.0))
+    for delay, opacity in ((0.0, 0.5), (0.07, 0.3), (0.14, 0.2))[:rings]:
         ring = bs.newnode(
             'locator',
             attrs={
@@ -759,12 +775,24 @@ def _release_punch_fx(spaz: Spaz, amount: float,
                 'additive': True,
             },
         )
-        size = SHOCKWAVE_RADIUS * 2.0 * (0.8 + 0.2 * power)
+        size = shock_radius * 2.0
         bs.animate_array(ring, 'size', 1,
                          {0: [0.3], delay: [0.3], delay + 0.3: [size]})
         bs.animate(ring, 'opacity',
                    {0: 0.0, delay: opacity, delay + 0.3: 0.0})
         bs.timer(delay + 0.35, ring.delete)
+    if level >= 1.0:
+        # A scorched crater and rocks thrown out of it.
+        scorch = bs.newnode(
+            'scorch',
+            attrs={'position': floor_pos, 'size': 0.4 + 0.3 * level,
+                   'big': level >= 2.0},
+        )
+        bs.animate(scorch, 'presence', {3.0: 1.0, 10.0: 0.0})
+        bs.timer(10.0, scorch.delete)
+        bs.emitfx(position=floor_pos, velocity=(fx * 4.0, 6.0, fz * 4.0),
+                  count=int(8 * level), scale=0.6, spread=0.8,
+                  chunk_type='rock')
 
     # And it physically shoves everything around the impact (no damage).
     held = node.hold_node
@@ -775,21 +803,32 @@ def _release_punch_fx(spaz: Spaz, amount: float,
         opos = other.position
         away = [opos[k] - center[k] for k in range(3)]
         dist = math.sqrt(sum(c * c for c in away))
-        if dist > SHOCKWAVE_RADIUS or dist < 0.01:
+        if dist > shock_radius or dist < 0.01:
             continue
         away = [c / dist for c in away]
-        falloff = 1.0 - dist / SHOCKWAVE_RADIUS
+        falloff = 1.0 - dist / shock_radius
         _knock(other, center, away, SHOCKWAVE_PUSH * power * (0.4 + falloff))
 
-    _shake(0.8 + 0.8 * power)
-    # The punch itself already plays the super-punch sound.
-    # Crack of the hit, the boom rolling out, debris settling.
-    _seq(center, (0, 'big_impact', 1.0), (0, 'punch_strong02', 1.0),
-         (0, 'swish', 0.9), (0.02, 'big_impact2', 0.7),
-         (0.04, 'explosion02', 0.45), (0.06, 'orchestra_hit_big2', 0.6),
-         (0.16, 'debris_fall', 0.35))
-    if amount >= 600:
-        _seq(center, (0, 'cymbal', 0.4), (0.1, 'gong', 0.3))
+    _shake(0.5 + 1.2 * level)
+
+    # Sound in tiers: heavier and more layered with the charge. (The punch
+    # itself already plays the super-punch sound.)
+    steps = [(0, 'big_impact', 1.0), (0, 'punch_strong01', 1.0),
+             (0, 'punch_strong02', 0.9), (0, 'swish', 0.9),
+             (0.02, 'explosion01', min(1.0, 0.4 + 0.2 * level))]
+    if level >= 0.25:
+        steps += [(0, 'impact_hard3', 0.8), (0.03, 'orchestra_hit', 0.6)]
+    if level >= 0.5:
+        steps += [(0.02, 'big_impact2', 0.9), (0.04, 'explosion02', 0.6),
+                  (0.06, 'orchestra_hit_big2', 0.7)]
+    if level >= 1.0:
+        steps += [(0.03, 'explosion03', 0.8), (0.05, 'orchestra_hit_big1', 0.8),
+                  (0, 'cymbal', 0.5), (0.12, 'gong', 0.5),
+                  (0.18, 'debris_fall', 0.6)]
+    if level >= 2.0:
+        steps += [(0.09, 'explosion04', 0.9), (0.1, 'big_impact', 0.8),
+                  (0.2, 'gong', 0.7), (0.3, 'wood_debris_fall', 0.6)]
+    _seq(center, *steps)
 
 
 def _freeze_node(target: bs.Node) -> None:
