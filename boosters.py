@@ -94,7 +94,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.18'
+BSM_VERSION = '2.19'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -1420,10 +1420,11 @@ def _fire_whip(spaz: Spaz) -> None:
                     start[2] + facing[2] * 8.0)
     beads = _tentacle_beads(start, max(_WHIP_BODY, _WHIP_SEGMENTS), 0.45,
                             0.18, None)
+    # Just a small glowing dot on its head.
     head_light = bs.newnode('light', attrs={
-        'position': start, 'color': _SLIME, 'radius': 0.25,
-        'intensity': 1.0, 'height_attenuated': False,
-        'volume_intensity_scale': 0.3})
+        'position': start, 'color': _SLIME, 'radius': 0.06,
+        'intensity': 0.8, 'height_attenuated': False,
+        'volume_intensity_scale': 0.0})
     source = spaz.source_player
     state: dict[str, Any] = {'time': 0.0, 'phase': 'crawl', 'victim': None,
                              'minis': [], 'head': start, 'trail': [start],
