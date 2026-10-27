@@ -6,11 +6,11 @@
 копится в заряд, и боец светится основным цветом своего скина. Следующая
 атака выпускает заряд:
   * удар кулаком — весь заряд входит в этот же удар (один удар, а не два);
-  * ракета и пинок своей бомбы из плагина BSM Boosters тоже забирают
-    заряд (плагины стакаются друг с другом);
+  * с плагином BSM Boosters заряд работает и через удар по своей ударной
+    или ледяной бомбе (плагины складываются друг с другом);
   * бомба — бомба светится и при взрыве бьёт всех вокруг накопленным уроном;
     заряженная ледяная бомба вдобавок пускает морозную волну, которая
-    замораживает всех в большом радиусе.
+    замораживает всех в радиусе в 1.7 раза больше обычного взрыва.
 
 Кнопка щита («5-я кнопка»):
   * двойное нажатие «Схватить» (работает везде, в том числе на сенсорном
@@ -58,7 +58,8 @@ BOMB_RADIUS_MULT = 1.6  # Радиус бонусного взрыва отно�
 PLAYERS_ONLY = True  # Только игроки (боты щит не используют).
 SHOW_HINT = True  # Подсказка про щит в начале каждой игры.
 FX_STRENGTH = 0.5  # Сила вспышек, света и тряски камеры (1.0 = максимум).
-FROST_RADIUS = 9.0  # Радиус морозной волны заряженной ледяной бомбы.
+FROST_RADIUS_MULT = 1.7  # Радиус морозной волны: во столько раз больше
+#                          радиуса взрыва заряженной ледяной бомбы.
 FROST_TIME = 5.0  # Сколько секунд держится заморозка от волны.
 FROST_WAVE_SPEED = 12.0  # Скорость фронта волны (метров в секунду).
 ABSORB_GRACE = 0.25  # Щит продлевается на столько после каждого поглощения
@@ -662,12 +663,51 @@ def _sonic_boom(pos: Sequence[float], direction: Sequence[float],
     _snd('swish', 1.0, pos)
 
 
-def _release_punch_fx(spaz: Spaz, amount: float) -> None:
+def _release_punch_fx(spaz: Spaz, amount: float,
+                      victim: bs.Node | None) -> None:
     node = spaz.node
+    col = _color(spaz)
+    hot = _bright(col, 2.0)
+    ppos = node.punch_position
+    pdir = node.punch_velocity
+    dlen = math.sqrt(sum(c * c for c in pdir)) or 1.0
+    fwd = tuple(c / dlen for c in pdir)
+
+    _sonic_boom(ppos, pdir, col, 0.5 + amount / 1000.0)
+
+    # Particles shooting through the target: colored burst at the fist...
+    expl = bs.newnode(
+        'explosion',
+        attrs={'position': ppos,
+               'radius': (0.5 + min(0.8, amount / 1500.0)) * FX_STRENGTH,
+               'color': col},
+    )
+    bs.timer(1.0, expl.delete)
+    _flash(ppos, hot, 1.0, 2.5, 3.0, 0.35)
+    _ring(ppos, hot, 3.5, 0.3)
+    _sparks(ppos, min(60, 20 + int(amount * 0.03)),
+            vel=(fwd[0] * 3.0, fwd[1] * 3.0 + 2.0, fwd[2] * 3.0),
+            spread=0.5, scale=1.2)
+    # ...and out of their back.
+    if victim:
+        vpos = victim.position_center
+        exit_pos = (vpos[0] + fwd[0] * 0.5, vpos[1] + fwd[1] * 0.5,
+                    vpos[2] + fwd[2] * 0.5)
+        bs.emitfx(position=exit_pos,
+                  velocity=(fwd[0] * 12.0, fwd[1] * 12.0 + 1.5,
+                            fwd[2] * 12.0),
+                  count=min(50, 15 + int(amount * 0.02)), scale=1.0,
+                  spread=0.2, chunk_type='spark')
+        bs.emitfx(position=exit_pos,
+                  velocity=(fwd[0] * 6.0, fwd[1] * 6.0 + 2.0, fwd[2] * 6.0),
+                  count=min(30, 8 + int(amount * 0.015)), scale=0.8,
+                  spread=0.3, chunk_type='sweat')
+
     # The punch itself already plays the super-punch sound.
-    _sonic_boom(node.punch_position, node.punch_velocity, _color(spaz),
-                0.5 + amount / 1000.0)
-    _snd('orchestra_hit_big2', 0.6, node.punch_position)
+    _snd('orchestra_hit_big2', 0.7, ppos)
+    _snd('punch_strong02', 1.0, ppos)
+    if amount >= 600:
+        _snd('cymbal', 0.5, ppos)
 
 
 def _freeze_node(target: bs.Node) -> None:
@@ -681,13 +721,14 @@ def _freeze_node(target: bs.Node) -> None:
     _snd('freeze', 1.0, tpos)
 
 
-def _frost_wave(pos: Sequence[float], owner: bs.Node | None) -> None:
+def _frost_wave(pos: Sequence[float], owner: bs.Node | None,
+                radius: float) -> None:
     """Ring of frost rolling out from a charged ice bomb, freezing all."""
     ice = (0.45, 0.8, 1.6)
-    duration = FROST_RADIUS / FROST_WAVE_SPEED
+    duration = radius / FROST_WAVE_SPEED
 
-    _ring(pos, ice, FROST_RADIUS * 2.0, duration)
-    _ring(pos, (0.85, 0.95, 1.6), FROST_RADIUS * 1.7, duration * 0.85)
+    _ring(pos, ice, radius * 2.0, duration)
+    _ring(pos, (0.85, 0.95, 1.6), radius * 1.7, duration * 0.85)
 
     # Frosty patch on the ground that grows with the wave, then melts.
     patch = bs.newnode(
@@ -702,7 +743,7 @@ def _frost_wave(pos: Sequence[float], owner: bs.Node | None) -> None:
         },
     )
     bs.animate_array(
-        patch, 'size', 1, {0: [0.5], duration: [FROST_RADIUS * 2.0]}
+        patch, 'size', 1, {0: [0.5], duration: [radius * 2.0]}
     )
     bs.animate(patch, 'opacity', {0: 0.35, duration: 0.25, duration + 1.5: 0})
     bs.timer(duration + 1.6, patch.delete)
@@ -712,7 +753,7 @@ def _frost_wave(pos: Sequence[float], owner: bs.Node | None) -> None:
         attrs={
             'position': pos,
             'color': ice,
-            'radius': FROST_RADIUS * 0.15 * FX_STRENGTH,
+            'radius': radius * 0.15 * FX_STRENGTH,
             'height_attenuated': False,
             'volume_intensity_scale': 0.6,
         },
@@ -724,7 +765,7 @@ def _frost_wave(pos: Sequence[float], owner: bs.Node | None) -> None:
     )
     bs.timer(duration + 0.7, light.delete)
 
-    bs.emitfx(position=pos, emit_type='distortion', spread=FROST_RADIUS * 0.5)
+    bs.emitfx(position=pos, emit_type='distortion', spread=radius * 0.5)
     bs.emitfx(position=pos, velocity=(0, 6, 0), count=40, scale=0.8,
               spread=1.5, chunk_type='ice')
     _snd('freeze', 1.0, pos)
@@ -754,7 +795,7 @@ def _frost_wave(pos: Sequence[float], owner: bs.Node | None) -> None:
     for step in range(1, steps + 1):
         bs.timer(
             duration * step / steps,
-            bs.CallStrict(_emit_front, FROST_RADIUS * step / steps),
+            bs.CallStrict(_emit_front, radius * step / steps),
         )
 
     # Freeze everyone as the front reaches them (corpses shatter).
@@ -767,9 +808,12 @@ def _frost_wave(pos: Sequence[float], owner: bs.Node | None) -> None:
             + (tpos[1] - pos[1]) ** 2
             + (tpos[2] - pos[2]) ** 2
         )
-        if dist <= FROST_RADIUS:
+        if dist <= radius:
+            # Never before the blast itself lands (0.05 s): freezing first
+            # would let the blast shatter them outright.
             bs.timer(
-                dist / FROST_WAVE_SPEED, bs.CallStrict(_freeze_node, target)
+                max(0.07, dist / FROST_WAVE_SPEED),
+                bs.CallStrict(_freeze_node, target),
             )
 
 
@@ -801,6 +845,8 @@ def _power_up_bomb(spaz: Spaz, bomb: Bomb) -> None:
     amount = _take_charge(spaz)
     if amount <= 0 or not bomb.node:
         return
+    # Other BSM plugins can tell (and spend) a charged bomb by this.
+    bomb._ab_charge = amount  # type: ignore[attr-defined]
     col = _color(spaz)
     hot = _bright(col, 1.8)
     owner = spaz.node
@@ -875,7 +921,11 @@ def _power_up_bomb(spaz: Spaz, bomb: Bomb) -> None:
             dist = math.sqrt(dx * dx + dy * dy + dz * dz)
             if dist > radius:
                 continue
-            falloff = max(0.35, 1.0 - dist / radius)
+            # Direct hits get the full charge; it fades further out.
+            falloff = (
+                1.0 if dist <= 1.2
+                else max(0.35, 1.0 - (dist - 1.2) / max(radius - 1.2, 0.1))
+            )
             dmg = amount * falloff
             norm = max(dist, 0.01)
             fdir = (dx / norm, dy / norm + 0.5, dz / norm)
@@ -893,7 +943,7 @@ def _power_up_bomb(spaz: Spaz, bomb: Bomb) -> None:
 
         # Charged ice bomb: frost wave on top of the bonus damage.
         if bmb.bomb_type == 'ice':
-            _frost_wave(pos, owner)
+            _frost_wave(pos, owner, blast.radius * FROST_RADIUS_MULT)
 
     bomb.add_explode_callback(_on_explode)
 
@@ -916,6 +966,7 @@ def _patched_handlemessage(self: Spaz, msg: Any) -> Any:
                 and self.node != pend['src']
             ):
                 pend['used'] = True
+                pend['victim'] = self.node
                 _merge_bonus(self, msg, pend['amount'], msg.pos,
                              msg.force_direction or (0.0, 0.0, 0.0))
                 msg.hit_subtype = 'super_punch'
@@ -951,7 +1002,7 @@ def _patched_handlemessage(self: Spaz, msg: Any) -> Any:
             _punch_bonus[0] = None
         if pend['used']:
             amount = _take_charge(self)
-            _release_punch_fx(self, amount)
+            _release_punch_fx(self, amount, pend.get('victim'))
         return result
 
     if isinstance(msg, bs.DieMessage):
