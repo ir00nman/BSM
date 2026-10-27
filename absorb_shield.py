@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.7'
+BSM_VERSION = '2.8'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -60,6 +60,8 @@ PUNCH_KNOCKBACK = 1.4  # Отброс заряженного кулака отн
 PUNCH_SPARK_SPEED = 3.5  # Во сколько раз быстрее (и дальше) летят искры удара.
 SHOCKWAVE_RADIUS = 3.0  # Радиус ударной волны заряженного кулака (метров).
 SHOCKWAVE_PUSH = 400.0  # Сила, с которой волна отбрасывает всё вокруг.
+IMPACT_FRAME = True  # Кадр удара (как в аниме): экран на миг темнеет при
+#                      ударе с зарядом от 100%.
 MAX_STORED = 3000  # Предел заряда (1000 = полное здоровье бойца).
 BOMB_RADIUS_MULT = 1.6  # Радиус бонусного взрыва относительно обычного.
 PLAYERS_ONLY = True  # Только игроки (боты щит не используют).
@@ -639,6 +641,56 @@ def _merge_bonus(victim: Spaz, msg: bs.HitMessage, bonus: float,
     msg.flat_damage = total / max(victim.impact_scale, 0.01)
 
 
+# Short-lived effect timers (nothing else in the game holds on to them).
+_FX_TIMERS: set = set()
+
+
+def _victim_trail(victim: bs.Node, duration: float, many: float) -> None:
+    state = {'time': 0.0}
+    holder: list = []
+
+    def _tick() -> None:
+        state['time'] += 0.03
+        if not victim or state['time'] > duration:
+            _FX_TIMERS.discard(holder[0])
+            return
+        pos = victim.position_center
+        bs.emitfx(position=pos, velocity=(0.0, 0.5, 0.0),
+                  count=max(1, int(3 * many)), scale=0.6, spread=0.15,
+                  chunk_type='spark')
+        bs.emitfx(position=pos, velocity=(0.0, 0.3, 0.0), count=1,
+                  scale=0.8, spread=0.1, chunk_type='sweat')
+
+    holder.append(bs.Timer(0.03, _tick, repeat=True))
+    _FX_TIMERS.add(holder[0])
+
+
+_IMPACT_FRAME_ON = [False]
+
+
+def _impact_frame(duration: float) -> None:
+    """Anime-style impact frame: the screen dips dark for an instant."""
+    if _IMPACT_FRAME_ON[0]:
+        return  # One at a time, so the original tint is always restored.
+    try:
+        gnode = bs.getactivity().globalsnode
+        original = tuple(gnode.tint)
+        gnode.tint = tuple(c * 0.35 for c in original)
+    except Exception:
+        return
+    _IMPACT_FRAME_ON[0] = True
+
+    def _restore() -> None:
+        _IMPACT_FRAME_ON[0] = False
+        try:
+            if gnode:
+                gnode.tint = original
+        except Exception:
+            pass
+
+    bs.timer(duration, _restore)
+
+
 def _release_punch_fx(spaz: Spaz, amount: float,
                       victim: bs.Node | None) -> None:
     """Charged punch: sparks shot clean through the target and a shock wave
@@ -808,6 +860,41 @@ def _release_punch_fx(spaz: Spaz, amount: float,
         away = [c / dist for c in away]
         falloff = 1.0 - dist / shock_radius
         _knock(other, center, away, SHOCKWAVE_PUSH * power * (0.4 + falloff))
+
+    # Bubbles of force bursting out of the impact (1-3 with the charge).
+    base_col = _bright(col, 1.0)
+    for delay, bright, max_r in ((0.0, 1.6, 1.2), (0.05, 1.0, 2.0),
+                                 (0.1, 0.6, 2.8))[:rings]:
+        sphere = bs.newnode(
+            'shield',
+            attrs={'position': center, 'radius': 0.1,
+                   'color': tuple(c * bright for c in base_col)},
+        )
+        radius = max_r * (0.6 + 0.4 * min(level, 2.0))
+        bs.animate(sphere, 'radius',
+                   {0: 0.1, delay: 0.1, delay + 0.22: radius})
+        bs.timer(delay + 0.24, sphere.delete)
+
+    # Motion streak along the punch, like a speed blur.
+    for i in range(8):
+        back = 0.2 * i * (0.6 + 0.4 * min(level, 2.0))
+        bs.emitfx(position=(ppos[0] - fx * back, ppos[1] - fy * back,
+                            ppos[2] - fz * back),
+                  velocity=(fx * 2.0, fy * 2.0, fz * 2.0), count=1,
+                  scale=0.5, spread=0.03, chunk_type='sweat')
+
+    # Dust kicked up off the ground.
+    if level >= 0.5:
+        bs.emitfx(position=floor_pos, count=int(1 + 2 * level),
+                  emit_type='tendrils', tendril_type='smoke')
+
+    # The victim leaves a trail of sparks and vapor as they fly off.
+    if victim:
+        _victim_trail(victim, 0.25 + 0.15 * level, many)
+
+    # Impact frame: the whole screen dips dark for an instant.
+    if IMPACT_FRAME and level >= 1.0:
+        _impact_frame(0.08 + 0.03 * min(level, 2.0))
 
     _shake(0.5 + 1.2 * level)
 
