@@ -30,13 +30,12 @@
     хватает ВСЕХ врагов в радиусе 3.5 м (и тех, кто зайдёт позже) — на
     каждого своё щупальце; подтягивает их к бомбе, пока не прилипнут, а
     потом обвивает;
-  * удар кулаком по своей липкой бомбе — она сворачивается в сеть (1 шт.):
-    комок сети с 4 грузиками-мини-бомбами. Сеть достаётся и бросается
-    кнопкой «Бомба», как обычная бомба, летит без самонаводки и
-    раскрывается при касании пола или врага (или через 1.4 с в воздухе):
-    паутина из нитей ловит врагов (валит с ног и стягивает к центру), а
-    через 1.6 с взрываются 4 липкие мини-бомбы на её углах. Заряд делает
-    их взрывы шире.
+  * удар кулаком по своей липкой бомбе — она превращается в щупальце
+    (1 шт., до 3). Кнопка «Бомба» выстреливает его из руки вперёд (до 8 м):
+    оно доворачивает к ближайшему врагу перед бойцом (до 40°), а если такого
+    нет — летит прямо и хватает первого, кого заденет. Пойманного валит с
+    ног, на него налепляются 4 липкие мини-бомбы и через 0.8 с взрываются
+    прямо на нём; заряд делает их взрывы шире. Потом щупальце втягивается.
 
 Работает и на «Счастливых мыслях»: направления и расстояния считаются в 3D.
 Мод нужен только хосту: в сетевой игре всё считается на сервере.
@@ -55,7 +54,6 @@ from bascenev1 import _classicassets
 from bascenev1lib.actor.bomb import Bomb, BombFactory, ExplodeMessage
 from bascenev1lib.actor.playerspaz import PlayerSpaz
 from bascenev1lib.actor.spaz import PunchHitMessage, Spaz
-from bascenev1lib.gameutils import SharedObjects
 
 if TYPE_CHECKING:
     from typing import Any, Sequence
@@ -77,11 +75,12 @@ ICE_MINI_BOMBS = 3  # Сколько мини-бомб разбрасывает 
 ICE_MINI_DELAY = 0.7  # Через сколько после основной взрывается первая...
 ICE_MINI_STAGGER = 0.2  # ...и с каким шагом остальные (сек).
 TENTACLE_RANGE = 3.5  # Дальность щупальцев заряженной липкой бомбы (метров).
-TENTACLE_PULL = 90.0  # Сила, с которой щупальце подтягивает врага.
-NET_RADIUS = 2.5  # Радиус раскрытой сети (метров).
-NET_HOLD = 1.6  # Сколько сеть держит, пока не рванут мини-бомбы (сек).
-NET_PULL = 220.0  # Как сильно сеть стягивает пойманных к центру.
-NET_MAX = 3  # Сколько сетей можно носить.
+TENTACLE_PULL = 160.0  # Сила, с которой щупальце подтягивает врага.
+WHIP_RANGE = 8.0  # Дальность щупальца-предмета (метров).
+WHIP_ANGLE = 40.0  # Насколько враг может быть в стороне от взгляда (градусов).
+WHIP_SPEED = 30.0  # Скорость вылета щупальца (м/с).
+WHIP_FUSE = 0.8  # Через сколько взрываются налепленные мини-бомбы (сек).
+WHIP_MAX = 3  # Сколько щупалец можно носить.
 FX_STRENGTH = 0.5  # Сила вспышек, света и тряски камеры (1.0 = максимум).
 FLASH_STRENGTH = 0.4  # Яркость и размер вспышек (1.0 = как в версии 1.5).
 
@@ -99,7 +98,7 @@ _orig_bomb_handle_impact: Any = None
 _orig_bomb_handlemessage: Any = None
 _orig_set_land_mine_count: Any = None
 
-_NET_COLOR = (0.55, 1.0, 0.45)
+_SLIME = (0.45, 1.4, 0.35)  # Tentacle color (glowing slime green).
 
 
 # ------------------------------- Helpers ----------------------------------
@@ -428,96 +427,79 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
     _step()
 
 
-# ------------------------------- Models -----------------------------------
-# Tentacles and nets are built from small slime "beads": prop nodes that
-# collide with nothing and are placed by hand every tick.
+# ------------------------------- Beads ------------------------------------
+# Tentacles are chains of small glowing bubbles: 'shield' nodes, the same
+# thing a shield powerup draws. The game itself moves shields around every
+# frame, so they can be placed freely and are always visible.
+
+# Falls back to slime particles if beads can't be placed.
+_BEADS_OK = [True]
 
 
-class _ModelFactory:
-    """Per-activity media and materials for bead models and nets."""
-
-    _STORENAME = 'bsm_model_factory'
-
-    def __init__(self) -> None:
-        shared = SharedObjects.get()
-        self.bead_mesh = _classicassets.meshes.bomb_sticky.get()
-        self.bundle_mesh = _classicassets.meshes.shrapnel_slime.get()
-        self.slime_tex = _classicassets.textures.bomb_sticky_color.get()
-        self.ghost = bs.Material()
-        self.ghost.add_actions(
-            actions=(
-                ('modify_part_collision', 'collide', False),
-                ('modify_part_collision', 'physical', False),
-            )
-        )
-        # Thrown net touching the floor or a fighter.
-        self.net = bs.Material()
-        self.net.add_actions(
-            conditions=(
-                ('they_have_material', shared.player_material),
-                'or',
-                ('they_have_material', shared.footing_material),
-            ),
-            actions=('message', 'our_node', 'at_connect', _NetTouchMessage()),
-        )
-
-    @classmethod
-    def get(cls) -> _ModelFactory:
-        activity = bs.getactivity()
-        factory = activity.customdata.get(cls._STORENAME)
-        if factory is None:
-            factory = cls()
-            activity.customdata[cls._STORENAME] = factory
-        return factory
-
-
-# Falls back to particle strands if the game won't let us move props.
-_MODELS_OK = [True]
-
-
-def _bead(pos: Sequence[float], scale: float,
+def _bead(pos: Sequence[float], radius: float,
           owner: bs.Node | None = None) -> bs.Node | None:
-    if not _MODELS_OK[0]:
+    if not _BEADS_OK[0]:
         return None
-    factory = _ModelFactory.get()
-    return bs.newnode(
-        'prop',
-        owner=owner,
-        attrs={
-            'position': pos,
-            'velocity': (0.0, 0.0, 0.0),
-            'body': 'sphere',
-            'body_scale': 0.1,
-            'mesh': factory.bead_mesh,
-            'mesh_scale': scale,
-            'color_texture': factory.slime_tex,
-            'shadow_size': 0.0,
-            'reflection': 'soft',
-            'reflection_scale': [0.4],
-            'materials': (factory.ghost,),
-        },
-    )
+    try:
+        return bs.newnode(
+            'shield',
+            owner=owner,
+            attrs={'position': pos, 'radius': radius, 'color': _SLIME},
+        )
+    except Exception:
+        _BEADS_OK[0] = False
+        return None
 
 
 def _place(node: bs.Node | None, pos: Sequence[float]) -> None:
-    if node is None or not node or not _MODELS_OK[0]:
+    if node is None or not node or not _BEADS_OK[0]:
         return
     try:
         node.position = pos
-        node.velocity = (0.0, 0.0, 0.0)
     except Exception:
-        _MODELS_OK[0] = False
+        _BEADS_OK[0] = False
 
 
-def _strand(start: Sequence[float], end: Sequence[float],
-            points: int) -> None:
-    """Particle strand (fallback when bead models aren't available)."""
-    for i in range(1, points + 1):
-        frac = i / (points + 1)
-        bs.emitfx(position=tuple(start[k] + (end[k] - start[k]) * frac
-                                 for k in range(3)),
-                  velocity=(0, 0, 0), count=1, scale=0.3, spread=0.0,
-                  chunk_type='slime')
+def _draw_tentacle(beads: list, pts: list, slime: bool) -> None:
+    """Pose a bead tentacle (or spray slime along it as a fallback)."""
+    if _BEADS_OK[0]:
+        for bead, pos in zip(beads, pts):
+            _place(bead, pos)
+    elif slime:
+        for pos in pts:
+            bs.emitfx(position=pos, velocity=(0, 0, 0), count=1, scale=0.35,
+                      spread=0.0, chunk_type='slime')
+
+
+def _tentacle_beads(base: Sequence[float], segments: int, thick: float,
+                    thin: float, owner: bs.Node | None) -> list:
+    """Thick at the root, thin at the tip."""
+    return [_bead(base, thick + (thin - thick) * i / max(segments - 1, 1),
+                  owner=owner) for i in range(segments)]
+
+
+def _delete_all(nodes: list) -> None:
+    for node in nodes:
+        if node:
+            node.delete()
+
+
+def _tentacle_curve(base: Sequence[float], tip: Sequence[float],
+                    phase: float, amp: float, segments: int) -> list[tuple]:
+    """Points along a wriggling tentacle from base to tip."""
+    vec = [b - a for a, b in zip(base, tip)]
+    side, slen = _norm((-vec[2], 0.0, vec[0]))
+    if slen < 1e-4:
+        side = (1.0, 0.0, 0.0)
+    pts = []
+    for i in range(segments):
+        frac = (i + 1) / segments
+        bend = math.sin(frac * math.pi)  # Pinned at both ends.
+        wave = math.sin(phase + frac * 5.0) * amp * bend
+        lift = math.cos(phase * 0.7 + frac * 4.0) * amp * 0.5 * bend
+        pts.append(tuple(base[k] + vec[k] * frac + side[k] * wave
+                         + (lift if k == 1 else 0.0) for k in range(3)))
+    return pts
 
 
 # -------------------------- Sticky bomb + charge --------------------------
@@ -536,36 +518,47 @@ def _tentacle_targets(spaz: Spaz, origin: Sequence[float]) -> list:
         if other is None or not other.is_alive() or not _is_enemy(spaz, other):
             continue
         _, dist = _norm([a - b for a, b in zip(node.position_center, origin)])
-        if dist <= TENTACLE_RANGE:
+        if dist <= TENTACLE_RANGE + 0.5:  # Reach to their body, not middle.
             found.append(node)
     return found
-
-
-def _tentacle_curve(base: Sequence[float], tip: Sequence[float],
-                    phase: float, amp: float) -> list[tuple]:
-    """Points along a wriggling tentacle from base to tip."""
-    vec = [b - a for a, b in zip(base, tip)]
-    side, slen = _norm((-vec[2], 0.0, vec[0]))
-    if slen < 1e-4:
-        side = (1.0, 0.0, 0.0)
-    pts = []
-    for i in range(_SEGMENTS):
-        frac = (i + 1) / _SEGMENTS
-        bend = math.sin(frac * math.pi)  # Pinned at both ends.
-        wave = math.sin(phase + frac * 5.0) * amp * bend
-        lift = math.cos(phase * 0.7 + frac * 4.0) * amp * 0.5 * bend
-        pts.append(tuple(base[k] + vec[k] * frac + side[k] * wave
-                         + (lift if k == 1 else 0.0) for k in range(3)))
-    return pts
 
 
 def _stop_tentacle(bomb: Bomb) -> None:
     bomb._bst_tentacle_timer = None  # type: ignore[attr-defined]
     for tent in getattr(bomb, '_bst_tentacles', []):
-        for bead in tent:
-            if bead:
-                bead.delete()
+        _delete_all(tent)
     bomb._bst_tentacles = []  # type: ignore[attr-defined]
+
+
+def _pose_tentacles(bomb: Bomb, bnode: bs.Node, bpos: Sequence[float],
+                    victims: list, grabbed: dict, tnow: float) -> None:
+    """Every tentacle holds a victim (spare ones double up), or they all
+    feel around while nobody is caught."""
+    tentacles = bomb._bst_tentacles
+    while len(tentacles) < len(victims):  # One tentacle per victim.
+        tentacles.append(
+            _tentacle_beads(bnode.position, _SEGMENTS, 0.17, 0.07, bnode)
+        )
+    for k, tent in enumerate(tentacles):
+        ang = tnow * 1.5 + k * 2.0 * math.pi / max(len(tentacles), 1)
+        if victims:
+            node = victims[k % len(victims)]
+            reeled = grabbed[node]
+            tpos = node.position_center
+            wrap = 0.35 if reeled else 0.25
+            tip = (tpos[0] + math.cos(ang * 2.0) * wrap,
+                   tpos[1] + 0.25 * math.sin(ang * 3.0),
+                   tpos[2] + math.sin(ang * 2.0) * wrap)
+            amp = 0.18 if reeled else 0.3
+        else:
+            tip = (bpos[0] + math.cos(ang) * 0.7,
+                   bpos[1] + 0.55 + 0.2 * math.sin(tnow * 3.0 + k),
+                   bpos[2] + math.sin(ang) * 0.7)
+            amp = 0.15
+        pts = _tentacle_curve(bpos, tip, tnow * 10.0 + k * 2.0, amp,
+                              _SEGMENTS)
+        _draw_tentacle(tent, pts,
+                       bool(victims) and int(tnow / _TICK) % 2 == 0)
 
 
 def _start_tentacle(bomb: Bomb) -> None:
@@ -577,14 +570,14 @@ def _start_tentacle(bomb: Bomb) -> None:
     _stop_tentacle(bomb)
     start = bnode.position
 
-    def _new_tentacle() -> list:
-        # Thick at the root, thin at the tip.
-        return [_bead(bnode.position, 0.42 - 0.26 * i / (_SEGMENTS - 1),
-                      owner=bnode) for i in range(_SEGMENTS)]
-
-    bomb._bst_tentacles = [  # type: ignore[attr-defined]
-        _new_tentacle() for _ in range(_TENTACLES)
-    ]
+    try:
+        bomb._bst_tentacles = [  # type: ignore[attr-defined]
+            _tentacle_beads(start, _SEGMENTS, 0.17, 0.07, bnode)
+            for _ in range(_TENTACLES)
+        ]
+    except Exception:
+        _BEADS_OK[0] = False
+        bomb._bst_tentacles = []  # type: ignore[attr-defined]
     # Grabbed enemies, in order of capture: node -> reeled in yet?
     grabbed: dict = {}
     state = {'time': 0.0}
@@ -614,38 +607,9 @@ def _start_tentacle(bomb: Bomb) -> None:
                           count=12, scale=0.6, spread=0.3,
                           chunk_type='slime')
         victims = list(grabbed)
-        tentacles = bomb._bst_tentacles
-        while len(tentacles) < len(victims):  # One tentacle per victim.
-            tentacles.append(_new_tentacle())
 
-        # Pose the tentacles: every one holds a victim (spare ones double
-        # up), or they all feel around while nobody is caught.
-        for k, tent in enumerate(tentacles):
-            ang = tnow * 1.5 + k * 2.0 * math.pi / max(len(tentacles), 1)
-            if victims:
-                node = victims[k % len(victims)]
-                reeled = grabbed[node]
-                tpos = node.position_center
-                wrap = 0.35 if reeled else 0.25
-                tip = (tpos[0] + math.cos(ang * 2.0) * wrap,
-                       tpos[1] + 0.25 * math.sin(ang * 3.0),
-                       tpos[2] + math.sin(ang * 2.0) * wrap)
-                amp = 0.18 if reeled else 0.3
-            else:
-                tip = (bpos[0] + math.cos(ang) * 0.7,
-                       bpos[1] + 0.55 + 0.2 * math.sin(tnow * 3.0 + k),
-                       bpos[2] + math.sin(ang) * 0.7)
-                amp = 0.15
-            pts = _tentacle_curve(bpos, tip, tnow * 10.0 + k * 2.0, amp)
-            if _MODELS_OK[0]:
-                for bead, pos in zip(tent, pts):
-                    _place(bead, pos)
-            elif victims and int(tnow / _TICK) % 2 == 0:
-                for pos in pts:
-                    bs.emitfx(position=pos, velocity=(0, 0, 0), count=1,
-                              scale=0.35, spread=0.0, chunk_type='slime')
-
-        # Reel in everyone not yet stuck to the bomb.
+        # Reel in everyone not yet stuck to the bomb (before any visuals, so
+        # a drawing hiccup can never stop the pull).
         for node in victims:
             if grabbed[node]:
                 continue
@@ -658,317 +622,205 @@ def _start_tentacle(bomb: Bomb) -> None:
             node.handlemessage(
                 'impulse', tpos[0], tpos[1], tpos[2], 0.0, 0.0, 0.0,
                 TENTACLE_PULL, TENTACLE_PULL * 0.08, 0.0, 0,
-                pull[0], pull[1] + 0.15, pull[2],
+                pull[0], pull[1] + 0.3, pull[2],
             )
+
+        try:
+            _pose_tentacles(bomb, bnode, bpos, victims, grabbed, tnow)
+        except Exception:
+            _BEADS_OK[0] = False  # Fall back to slime particles.
 
     bomb._bst_tentacle_timer = bs.Timer(  # type: ignore[attr-defined]
         _TICK, _step, repeat=True
     )
 
 
-# ------------------------------ Charged net -------------------------------
+# ---------------------------- Tentacle whip -------------------------------
 
-
-class _NetTouchMessage:
-    """A thrown net touched the floor or a fighter."""
+_WHIP_SEGMENTS = 10
 
 
 def _update_counter(spaz: Spaz) -> None:
-    """Nets show in the counter over the head (mines once out of nets)."""
+    """Whips show in the counter over the head (mines once out of them)."""
     node = spaz.node
     if not node:
         return
-    if spaz._bst_nets > 0:
-        node.counter_text = f'x{spaz._bst_nets}'
+    if spaz._bst_whips > 0:
+        node.counter_text = f'x{spaz._bst_whips}'
         node.counter_texture = _classicassets.textures.powerup_sticky_bombs.get()
     else:
         _orig_set_land_mine_count(spaz, spaz.land_mine_count)
 
 
-def _wrap_into_net(spaz: Spaz, bomb: Bomb) -> None:
-    """Charged punch on our sticky bomb: it folds up into a throwable net."""
+def _wrap_into_whip(spaz: Spaz, bomb: Bomb) -> None:
+    """Charged punch on our sticky bomb: it turns into a tentacle whip."""
     charge = _bomb_charge(bomb) or Spaz.bsm_take_charge(spaz)
     bpos = bomb.node.position
     bomb.handlemessage(bs.DieMessage())  # Consumed, never goes off.
-    spaz._bst_nets = min(NET_MAX, spaz._bst_nets + 1)
-    spaz._bst_net_charge += charge
+    spaz._bst_whips = min(WHIP_MAX, spaz._bst_whips + 1)
+    spaz._bst_whip_charge += charge
     _update_counter(spaz)
 
     bs.emitfx(position=bpos, velocity=(0, 3, 0), count=20, scale=0.7,
               spread=0.4, chunk_type='slime')
-    _flash(bpos, _NET_COLOR, 0.8, 1.2, 1.5, 0.25)
+    _flash(bpos, _SLIME, 0.8, 1.2, 1.5, 0.25)
     _snd('sticky_impact', 1.0, bpos)
     _snd('splatter', 0.8, bpos)
     _snd('powerup01', 0.7, bpos)
-    _popup_text('СЕТЬ!', spaz.node.position, _NET_COLOR)
+    _popup_text('ЩУПАЛЬЦЕ!', spaz.node.position, _SLIME)
 
 
-class NetBundle(bs.Actor):
-    """A folded net with four weights; held and thrown like a bomb."""
-
-    def __init__(self, spaz: Spaz, charge: float):
-        super().__init__()
-        factory = _ModelFactory.get()
-        node = spaz.node
-        self.owner = node
-        self._owner_ref = weakref.ref(spaz)
-        self._source_player = spaz.source_player
-        self.charge = charge
-        self.thrown = False
-        self.deployed = False
-        self._flight = 0.0
-        self._time = 0.0
-        pos = node.position_forward
-        self.node = bs.newnode(
-            'prop',
-            delegate=self,
-            attrs={
-                'position': pos,
-                'velocity': node.velocity,
-                'body': 'sphere',
-                'body_scale': 1.0,  # Weighs (and throws) like a bomb.
-                'mesh': factory.bundle_mesh,
-                'mesh_scale': 1.1,
-                'color_texture': factory.slime_tex,
-                'shadow_size': 0.3,
-                'reflection': 'soft',
-                'reflection_scale': [0.4],
-                'materials': (SharedObjects.get().object_material,
-                              factory.net),
-            },
-        )
-        bs.animate(self.node, 'mesh_scale', {0: 0.0, 0.15: 1.3, 0.25: 1.1})
-        # Wound-up strands around the core and four dangling weights.
-        self._strands = [_bead(pos, 0.16, owner=self.node) for _ in range(6)]
-        self._weights = [_bead(pos, 0.24, owner=self.node) for _ in range(4)]
-        self._timer = bs.Timer(_TICK, bs.WeakCallStrict(self._step),
-                               repeat=True)
-
-    def get_source_player(self, playertype: Any) -> Any:
-        player = self._source_player
-        if (player is not None and player.exists()
-                and isinstance(player, playertype)):
-            return player
-        return None
-
-    def _step(self) -> None:
-        if not self.node or self.deployed:
-            return
-        self._time += _TICK
-        pos = self.node.position
-        spin = self._time * 3.0
-        for i, bead in enumerate(self._strands):
-            ang = spin + i * math.pi / 3
-            _place(bead, (pos[0] + math.cos(ang) * 0.28,
-                          pos[1] + 0.12 * math.sin(spin * 1.5 + i),
-                          pos[2] + math.sin(ang) * 0.28))
-        for i, bead in enumerate(self._weights):
-            ang = -spin * 0.6 + i * math.pi / 2
-            _place(bead, (pos[0] + math.cos(ang) * 0.45,
-                          pos[1] - 0.15 + 0.05 * math.sin(spin * 2 + i),
-                          pos[2] + math.sin(ang) * 0.45))
-        if self.thrown:
-            self._flight += _TICK
-            if self._flight > 1.4:
-                self.deploy()  # Opens in mid-air too (Happy Thoughts).
-
-    def deploy(self) -> None:
-        if self.deployed or not self.node:
-            return
-        self.deployed = True
-        self._timer = None
-        center = self.node.position
-        vel = self.node.velocity
-        spaz = self._owner_ref()
-        source = self.get_source_player(bs.Player)
-        owner = self.owner
-        self.node.delete()
-        _open_net(center, vel, spaz, owner, source, self.charge)
-
-    def handlemessage(self, msg: Any) -> Any:
-        if isinstance(msg, bs.DroppedMessage):
-            self.thrown = True
-            self._flight = 0.0
-            _snd('swip2', 0.8, self.node.position if self.node else None)
-        elif isinstance(msg, bs.PickedUpMessage):
-            self.thrown = False
-        elif isinstance(msg, _NetTouchMessage):
-            if self.thrown:
-                try:
-                    other = bs.getcollision().opposingnode
-                except bs.NotFoundError:
-                    other = None
-                if other is None or other != self.owner:
-                    self.deploy()
-        elif isinstance(msg, bs.HitMessage):
-            if self.thrown:
-                self.deploy()
-        elif isinstance(msg, bs.OutOfBoundsMessage):
-            self.handlemessage(bs.DieMessage())
-        elif isinstance(msg, bs.DieMessage):
-            self._timer = None
-            if self.node:
-                self.node.delete()
-        else:
-            return super().handlemessage(msg)
-        return None
-
-
-def _draw_net_in_hand(spaz: Spaz) -> NetBundle:
-    """The bomb button pulls out a net instead of a bomb."""
-    spaz._bst_nets -= 1
-    charge, spaz._bst_net_charge = spaz._bst_net_charge, 0.0
-    _update_counter(spaz)
-    net = NetBundle(spaz, charge).autoretain()
-    spaz._pick_up(net.node)
-    _snd('sticky_impact', 0.6, net.node.position)
-    return net
-
-
-def _open_net(center: Sequence[float], vel: Sequence[float],
-              owner_spaz: Spaz | None, owner_node: bs.Node | None,
-              source: Any, charge: float) -> None:
-    """The net bursts open: a web of strands catches enemies, then the
-    corner weights (mini sticky bombs) go off."""
-    radius = NET_RADIUS
-    yaw = math.atan2(vel[2], vel[0]) if abs(vel[0]) + abs(vel[2]) > 0.1 else 0
-
-    def _at(ang: float, dist: float, lift: float = 0.0) -> tuple:
-        return (center[0] + math.cos(ang) * dist, center[1] + 0.1 + lift,
-                center[2] + math.sin(ang) * dist)
-
-    # The web: 8 spokes, a middle ring and the rim, all slime strands.
-    layout: list[tuple[float, float]] = []  # (angle, distance)
-    for i in range(8):
-        for frac in (0.3, 0.55, 0.8):
-            layout.append((yaw + i * math.pi / 4, radius * frac))
-    for i in range(8):
-        layout.append((yaw + math.pi / 8 + i * math.pi / 4, radius * 0.55))
-    for i in range(16):
-        layout.append((yaw + i * math.pi / 8, radius * 0.97))
-    beads = [_bead(center, 0.14) for _ in layout]
-
-    floor = bs.newnode(
-        'locator',
-        attrs={
-            'shape': 'circle',
-            'position': center,
-            'color': _NET_COLOR,
-            'opacity': 0.12,
-            'draw_beauty': False,
-            'additive': True,
-        },
-    )
-    bs.animate_array(floor, 'size', 1, {0: [0.1], 0.25: [radius * 2.0]})
-
-    # Burst open.
-    bs.emitfx(position=center, velocity=(0, 4, 0), count=30, scale=0.8,
-              spread=0.6, chunk_type='slime')
-    bs.emitfx(position=center, emit_type='distortion',
-              spread=0.8 * FX_STRENGTH)
-    _snd('splatter', 1.0, center)
-    _snd('sticky_impact', 1.0, center)
-    _snd('swip2', 0.8, center)
-    _snd('cork_pop', 1.0, center)
-
-    # The four weights: mini sticky bombs at the corners (on the spokes).
-    blast = 1.3 + min(1.0, charge / 1000.0)  # Charge widens them.
-    corners = [_at(yaw + math.pi / 4 + i * math.pi / 2, radius * 0.97, 0.2)
-               for i in range(4)]
-    minis = [
-        Bomb(
-            position=cpos,
-            velocity=(0.0, -1.0, 0.0),
-            bomb_type='sticky',
-            blast_radius=blast,
-            bomb_scale=0.55,
-            source_player=source,
-            owner=owner_node,
-        ).autoretain()
-        for cpos in corners
-    ]
-
-    caught: set = set()
-    state = {'time': 0.0}
-
-    def _is_target(node: bs.Node) -> bool:
+def _whip_target(spaz: Spaz, facing: Sequence[float]) -> bs.Node | None:
+    """Closest enemy in front (horizontal cone, any height)."""
+    origin = spaz.node.position_center
+    min_cos = math.cos(math.radians(WHIP_ANGLE))
+    best: bs.Node | None = None
+    best_score = 0.0
+    for node in bs.getnodes():
+        if not node or node.getnodetype() != 'spaz':
+            continue
         other = node.getdelegate(Spaz)
-        if other is None or not other.is_alive() or node == owner_node:
-            return False
-        if owner_spaz is not None:
-            return _is_enemy(owner_spaz, other)
-        return True
+        if other is None or not other.is_alive() or not _is_enemy(spaz, other):
+            continue
+        tpos = node.position_center
+        _, dist = _norm([a - b for a, b in zip(tpos, origin)])
+        flat, flen = _norm((tpos[0] - origin[0], 0.0, tpos[2] - origin[2]))
+        if dist > WHIP_RANGE or flen < 0.01:
+            continue
+        cos = flat[0] * facing[0] + flat[2] * facing[2]
+        if cos < min_cos:
+            continue
+        score = dist / cos
+        if best is None or score < best_score:
+            best, best_score = node, score
+    return best
+
+
+def _fire_whip(spaz: Spaz) -> None:
+    """The bomb button lashes the tentacle out of the fighter's hand."""
+    node = spaz.node
+    spaz._bst_whips -= 1
+    charge, spaz._bst_whip_charge = spaz._bst_whip_charge, 0.0
+    _update_counter(spaz)
+    spaz._bst_whip_active = True
+
+    facing, flen = _norm((node.position_forward[0] - node.position[0], 0.0,
+                          node.position_forward[2] - node.position[2]))
+    if flen < 1e-4:
+        facing = (1.0, 0.0, 0.0)
+
+    def _base() -> tuple:
+        pos = node.position_center
+        return (pos[0] + facing[0] * 0.35, pos[1] + 0.15,
+                pos[2] + facing[2] * 0.35)
+
+    target = _whip_target(spaz, facing)
+    start = _base()
+    straight_end = tuple(start[k] + facing[k] * WHIP_RANGE for k in range(3))
+    beads = _tentacle_beads(start, _WHIP_SEGMENTS, 0.16, 0.06, node)
+    source = spaz.source_player
+    state: dict[str, Any] = {'time': 0.0, 'phase': 'out', 'tip': start,
+                             'victim': None}
+    _snd('swip2', 1.0, start)
+    _snd('sticky_impact', 0.7, start)
+
+    def _finish() -> None:
+        spaz._bst_whip_active = False
+        spaz._bst_whip_timer = None
+        _delete_all(beads)
+
+    def _latch(victim_node: bs.Node) -> None:
+        state['phase'] = 'hold'
+        state['victim'] = victim_node
+        state['hold_until'] = state['time'] + WHIP_FUSE + 0.45
+        vpos = victim_node.position_center
+        victim_node.handlemessage('knockout', (WHIP_FUSE + 0.2) * 1000.0)
+        bs.emitfx(position=vpos, velocity=(0, 3, 0), count=20, scale=0.7,
+                  spread=0.4, chunk_type='slime')
+        _snd('splatter', 1.0, vpos)
+        _snd('sticky_impact', 1.0, vpos)
+        _snd('cork_pop', 1.0, vpos)
+        # Four mini sticky bombs slap onto them from all sides.
+        blast = 1.2 + min(1.0, charge / 1000.0)  # Charge widens them.
+        for i in range(4):
+            ang = i * math.pi / 2 + math.pi / 4
+            out = (math.cos(ang), 0.0, math.sin(ang))
+            mini = Bomb(
+                position=(vpos[0] + out[0] * 0.4, vpos[1] + 0.2,
+                          vpos[2] + out[2] * 0.4),
+                velocity=(-out[0] * 3.0, 0.0, -out[2] * 3.0),
+                bomb_type='sticky',
+                blast_radius=blast,
+                bomb_scale=0.5,
+                source_player=source,
+                owner=node,
+            ).autoretain()
+            bs.timer(WHIP_FUSE + 0.1 * i,
+                     bs.WeakCallStrict(mini.handlemessage, ExplodeMessage()))
 
     def _step() -> None:
         state['time'] += _TICK
         tnow = state['time']
-        # Unfold with a little overshoot, then ripple while it holds.
-        unfold = min(1.0, tnow / 0.25)
-        spread = 1.0 - (1.0 - unfold) ** 3
-        if unfold < 1.0:
-            spread *= 1.0 + 0.08 * math.sin(unfold * math.pi)
-        if _MODELS_OK[0]:
-            for bead, (ang, dist) in zip(beads, layout):
-                ripple = 0.06 * math.sin(tnow * 8.0 - dist * 3.0)
-                _place(bead, _at(ang, dist * spread, ripple))
-        elif int(tnow / _TICK) % 6 == 0:
-            for i in range(4):
-                _strand(center, corners[i], 3)
-                _strand(corners[i], corners[(i + 1) % 4], 3)
-
-        # Every 0.1 s: catch anyone inside (walking in too), reel them in.
-        if int(tnow / _TICK) % 3 == 0:
-            for node in bs.getnodes():
-                if (not node or node.getnodetype() != 'spaz'
-                        or not _is_target(node)):
-                    continue
-                tpos = node.position_center
-                dx, dz = center[0] - tpos[0], center[2] - tpos[2]
-                if (math.hypot(dx, dz) > radius * spread
-                        or abs(tpos[1] - center[1]) > 1.6):
-                    continue
-                pull, _ = _norm((dx, center[1] - tpos[1], dz))
-                if node not in caught:
-                    caught.add(node)
-                    left = max(0.2, NET_HOLD - tnow)
-                    node.handlemessage('knockout', left * 1000.0)
-                    bs.emitfx(position=tpos, velocity=(0, 2, 0), count=12,
-                              scale=0.6, spread=0.3, chunk_type='slime')
-                    _snd('sticky_impact', 1.0, tpos)
-                    _snd('splatter', 0.6, tpos)
-                node.handlemessage(
-                    'impulse', tpos[0], tpos[1], tpos[2], 0.0, 0.0, 0.0,
-                    NET_PULL, NET_PULL * 0.08, 0.0, 0,
-                    pull[0], pull[1] + 0.1, pull[2],
-                )
-        if tnow >= NET_HOLD:
+        if not node or not spaz.is_alive():
             _finish()
+            return
+        base = _base()
+        tip = state['tip']
+        phase = state['phase']
 
-    def _finish() -> None:
-        holder['timer'] = None
-        for i, mini in enumerate(minis):
-            bs.timer(0.06 * i,
-                     bs.WeakCallStrict(mini.handlemessage, ExplodeMessage()))
-        for bead in beads:
-            if bead:
-                bs.animate(bead, 'mesh_scale', {0: 0.14, 0.2: 0.0})
-                bs.timer(0.22, bead.delete)
-        if floor:
-            bs.animate(floor, 'opacity', {0: 0.12, 0.2: 0.0})
-            bs.timer(0.25, floor.delete)
+        if phase == 'out':
+            victim = target.getdelegate(Spaz) if target else None
+            homing = victim is not None and victim.is_alive()
+            goal = target.position_center if homing else straight_end
+            move, dist = _norm([a - b for a, b in zip(goal, tip)])
+            step = WHIP_SPEED * _TICK
+            tip = goal if dist <= step else tuple(
+                tip[k] + move[k] * step for k in range(3))
+            state['tip'] = tip
+            if homing and _norm([a - b for a, b in
+                                 zip(target.position_center, tip)])[1] < 0.6:
+                _latch(target)
+            elif not homing:
+                # No aim: grab the first enemy the tip brushes past.
+                for vnode in _tentacle_targets(spaz, tip):
+                    if _norm([a - b for a, b in
+                              zip(vnode.position_center, tip)])[1] < 0.8:
+                        _latch(vnode)
+                        break
+                else:
+                    if dist <= step or tnow > 0.8:
+                        state['phase'] = 'back'
+            if tnow > 0.8 and state['phase'] == 'out':
+                state['phase'] = 'back'
+        elif phase == 'hold':
+            vnode = state['victim']
+            if vnode:
+                state['tip'] = tip = vnode.position_center
+            if tnow >= state['hold_until'] or not vnode:
+                state['phase'] = 'back'
+                _snd('swip', 0.8, base)
+        else:  # Reeling back in.
+            move, dist = _norm([a - b for a, b in zip(base, tip)])
+            step = WHIP_SPEED * 1.3 * _TICK
+            if dist <= step:
+                _finish()
+                return
+            state['tip'] = tip = tuple(tip[k] + move[k] * step
+                                       for k in range(3))
 
-    holder = {'timer': bs.Timer(_TICK, _step, repeat=True)}
-    _NET_WEBS.append(holder)
+        amp = 0.3 if state['phase'] == 'out' else 0.12
+        try:
+            pts = _tentacle_curve(base, state['tip'], tnow * 14.0, amp,
+                                  _WHIP_SEGMENTS)
+            _draw_tentacle(beads, pts, True)
+            bs.emitfx(position=state['tip'], velocity=(0, -1, 0), count=1,
+                      scale=0.4, spread=0.05, chunk_type='slime')
+        except Exception:
+            _BEADS_OK[0] = False  # Visuals must never stop the whip.
 
-    def _forget() -> None:
-        if holder in _NET_WEBS:
-            _NET_WEBS.remove(holder)
-
-    bs.timer(NET_HOLD + 0.5, _forget)
-
-
-# Open nets' timers (nothing else in the game holds on to them).
-_NET_WEBS: list[dict] = []
+    spaz._bst_whip_timer = bs.Timer(_TICK, _wcall(lambda s: _step(), spaz),
+                                    repeat=True)
+    _step()
 
 
 # --------------------------- Ice bomb + charge ----------------------------
@@ -1101,8 +953,10 @@ def _patched_init(self: Spaz, *args: Any, **kwargs: Any) -> None:
     self._bst_ice_timer: bs.Timer | None = None
     self._bst_ice_fx_timer: bs.Timer | None = None
     self._bst_old_highlight: Any = None
-    self._bst_nets = 0
-    self._bst_net_charge = 0.0
+    self._bst_whips = 0
+    self._bst_whip_charge = 0.0
+    self._bst_whip_active = False
+    self._bst_whip_timer: bs.Timer | None = None
 
 
 def _patched_handlemessage(self: Spaz, msg: Any) -> Any:
@@ -1130,7 +984,7 @@ def _patched_handlemessage(self: Spaz, msg: Any) -> Any:
             elif bomb.bomb_type == 'ice':
                 _absorb_ice_bomb(self, bomb)
             else:
-                _wrap_into_net(self, bomb)
+                _wrap_into_whip(self, bomb)
             return None
 
         # Ice fists: whoever we punch freezes.
@@ -1152,8 +1006,9 @@ def _patched_handlemessage(self: Spaz, msg: Any) -> Any:
 
 
 def _patched_drop_bomb(self: Spaz) -> Bomb | None:
-    if getattr(self, '_bst_nets', 0) > 0 and self.node and not self.frozen:
-        _draw_net_in_hand(self)
+    if getattr(self, '_bst_whips', 0) > 0 and self.node and not self.frozen:
+        if not self._bst_whip_active:
+            _fire_whip(self)
         # Not a bomb: other plugins/games shouldn't treat it as one.
         return None
     # Checked before the call: Absorb Shield may spend the charge inside it.
@@ -1172,7 +1027,7 @@ def _patched_drop_bomb(self: Spaz) -> Bomb | None:
 
 def _patched_set_land_mine_count(self: Spaz, count: int) -> None:
     _orig_set_land_mine_count(self, count)
-    if getattr(self, '_bst_nets', 0) > 0:
+    if getattr(self, '_bst_whips', 0) > 0:
         _update_counter(self)
 
 
