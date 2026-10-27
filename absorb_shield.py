@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.17'
+BSM_VERSION = '2.18'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -489,13 +489,14 @@ def _start_glow(spaz: Spaz) -> None:
         owner=node,
         attrs={
             'color': col,
-            'radius': 0.25 + 0.15 * level,
+            # A soft glow that hugs the fighter, even when fully charged.
+            'radius': 0.13 + 0.07 * level,
             'height_attenuated': False,
-            'volume_intensity_scale': 0.4,
+            'volume_intensity_scale': 0.2,
         },
     )
     node.connectattr('position_center', light, 'position')
-    lo, hi = 0.5 + 0.3 * level, 1.1 + 0.7 * level
+    lo, hi = 0.25 + 0.15 * level, 0.55 + 0.3 * level
     bs.animate(light, 'intensity', {0: lo, 0.35: hi, 0.7: lo}, loop=True)
 
     # Ground halo that breathes with the light.
@@ -505,14 +506,14 @@ def _start_glow(spaz: Spaz) -> None:
         attrs={
             'shape': 'circle',
             'color': col,
-            'opacity': 0.25,
+            'opacity': 0.15,
             'draw_beauty': False,
             'additive': True,
         },
     )
     node.connectattr('position', halo, 'position')
     bs.animate_array(
-        halo, 'size', 1, {0: [1.1], 0.35: [1.4], 0.7: [1.1]}, loop=True
+        halo, 'size', 1, {0: [0.8], 0.35: [1.0], 0.7: [0.8]}, loop=True
     )
 
     # Charge counter floating over the head.
