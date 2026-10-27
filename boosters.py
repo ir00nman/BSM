@@ -26,9 +26,15 @@
     другой вскоре после основной.
 
 Липкая бомба, заряжен:
-  брошенная заряженная липкая бомба, как только рядом (до 5 м) окажется
-  враг, выстреливает в него щупальцем из слизи и подтягивает к себе,
-  пока он не прилипнет.
+  * брошенная заряженная липкая бомба, как только рядом (до 5 м) окажется
+    враг, выстреливает в него щупальцем из слизи и подтягивает к себе,
+    пока он не прилипнет;
+  * удар кулаком по своей липкой бомбе — она сворачивается в сеть (1 шт.).
+    Сеть достаётся и бросается кнопкой «Бомба», как обычная бомба, летит
+    без самонаводки и раскрывается при касании пола или врага (или через
+    1.4 с в воздухе): большая паутина ловит врагов (валит с ног и стягивает
+    к центру), а через 1.6 с взрываются 4 липкие мини-бомбы на её углах.
+    Заряд делает их взрывы шире.
 
 Работает и на «Счастливых мыслях»: направления и расстояния считаются в 3D.
 Мод нужен только хосту: в сетевой игре всё считается на сервере.
@@ -44,7 +50,12 @@ from typing import TYPE_CHECKING
 import babase
 import bascenev1 as bs
 from bascenev1 import _classicassets
-from bascenev1lib.actor.bomb import Bomb, BombFactory, ExplodeMessage
+from bascenev1lib.actor.bomb import (
+    Bomb,
+    BombFactory,
+    ExplodeMessage,
+    SplatMessage,
+)
 from bascenev1lib.actor.playerspaz import PlayerSpaz
 from bascenev1lib.actor.spaz import PunchHitMessage, Spaz
 
@@ -57,7 +68,6 @@ if TYPE_CHECKING:
 
 IMPACT_SPEED = 22.0  # Скорость ударной бомбы после удара (м/с).
 IMPACT_FLIGHT_TIME = 4.0  # Сколько она ищет путь к врагу, потом взрывается.
-KICK_HITSTOP = 0.14  # Замирание бомбы после удара перед выстрелом (сек).
 IMPACT_RANGE = 25.0  # Дальность поиска врага для неё (метров).
 IMPACT_ANGLE = 45.0  # Насколько враг может быть в стороне от удара (градусов).
 ICE_FISTS_TIME = 8.0  # Ледяные кулаки: базовая длительность (сек)...
@@ -69,6 +79,10 @@ ICE_MINI_DELAY = 0.7  # Через сколько после основной в
 ICE_MINI_STAGGER = 0.2  # ...и с каким шагом остальные (сек).
 TENTACLE_RANGE = 5.0  # Дальность щупальца заряженной липкой бомбы (метров).
 TENTACLE_PULL = 90.0  # Сила, с которой щупальце подтягивает врага.
+NET_RADIUS = 2.5  # Радиус раскрытой сети (метров).
+NET_HOLD = 1.6  # Сколько сеть держит, пока не рванут мини-бомбы (сек).
+NET_PULL = 220.0  # Как сильно сеть стягивает пойманных к центру.
+NET_MAX = 3  # Сколько сетей можно носить.
 FX_STRENGTH = 0.5  # Сила вспышек, света и тряски камеры (1.0 = максимум).
 FLASH_STRENGTH = 0.4  # Яркость и размер вспышек (1.0 = как в версии 1.5).
 
@@ -84,6 +98,9 @@ _orig_handlemessage: Any = None
 _orig_drop_bomb: Any = None
 _orig_bomb_handle_impact: Any = None
 _orig_bomb_handlemessage: Any = None
+_orig_set_land_mine_count: Any = None
+
+_NET_COLOR = (0.55, 1.0, 0.45)
 
 
 # ------------------------------- Helpers ----------------------------------
@@ -270,40 +287,6 @@ def _find_target(spaz: Spaz, origin: Sequence[float],
     return best
 
 
-def _shock_ring(center: Sequence[float], fwd: Sequence[float], speed: float,
-                chunk: str, scale: float, points: int = 24) -> None:
-    """Particles bursting out in a ring perpendicular to a direction."""
-    side, slen = _norm((-fwd[2], 0.0, fwd[0]))
-    if slen < 1e-4:
-        side = (1.0, 0.0, 0.0)
-    ring_up = (side[1] * fwd[2] - side[2] * fwd[1],
-               side[2] * fwd[0] - side[0] * fwd[2],
-               side[0] * fwd[1] - side[1] * fwd[0])
-    for i in range(points):
-        ang = 2.0 * math.pi * i / points
-        ca, sa = math.cos(ang), math.sin(ang)
-        out = tuple(side[k] * ca + ring_up[k] * sa for k in range(3))
-        bs.emitfx(position=tuple(center[k] + out[k] * 0.2 for k in range(3)),
-                  velocity=tuple(out[k] * speed for k in range(3)),
-                  count=1, scale=scale, spread=0.02, chunk_type=chunk)
-
-
-def _implode(center: Sequence[float], duration: float) -> None:
-    """Sparks rushing in from all around, arriving as the hit-stop ends."""
-    radius = 1.4
-    for i in range(18):
-        # Spread evenly over a sphere (golden-angle spiral).
-        yv = 1.0 - 2.0 * (i + 0.5) / 18
-        rad = math.sqrt(max(0.0, 1.0 - yv * yv))
-        ang = i * 2.39996
-        out = (math.cos(ang) * rad, yv, math.sin(ang) * rad)
-        bs.emitfx(
-            position=tuple(center[k] + out[k] * radius for k in range(3)),
-            velocity=tuple(-out[k] * radius / duration for k in range(3)),
-            count=1, scale=0.6, spread=0.0, chunk_type='spark',
-        )
-
-
 def _avoid_dirs(want: Sequence[float]) -> list[tuple[float, float, float]]:
     """Ways around an obstacle: over, under or past it on either side."""
     side, slen = _norm((-want[2], 0.0, want[0]))  # Horizontal perpendicular.
@@ -347,40 +330,17 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
     if _bomb_charge(bomb) <= 0:
         Spaz.bsm_charge_projectile(spaz, bomb)
 
-    # Hit-stop: the bomb freezes for a beat while energy rushes into it,
-    # then fires (see _release below). Never goes off while frozen.
-    final_levitate = bomb._bst_levitate  # type: ignore[attr-defined]
-    bomb._bst_levitate = True  # type: ignore[attr-defined]
-    bpos0 = bnode.position
-    _flash(node.punch_position, hot, 0.8, 1.2, 2.0, 0.15)
-    _implode(bpos0, KICK_HITSTOP)
-    bs.emitfx(position=bpos0, emit_type='distortion',
-              spread=0.6 * FX_STRENGTH)
-    _shake(0.6)
-    _snd('punch_strong02', 1.0, bpos0)
-    _snd('powerup01', 0.8, bpos0)
-    _snd('laser', 0.5, bpos0)
-
-    def _release(bpos: Sequence[float], fdir: Sequence[float]) -> None:
-        bomb._bst_levitate = final_levitate  # type: ignore[attr-defined]
-        _flash(bpos, hot, 1.0, 1.6, 2.5, 0.25)
-        _shock_ring(bpos, fdir, 10.0, 'spark', 0.7)
-        _shock_ring(bpos, fdir, 6.0, 'sweat', 0.9)
-        bs.timer(0.05, bs.CallStrict(_shock_ring, bpos, fdir, 14.0, 'sweat',
-                                     0.7))
-        bs.emitfx(position=bpos, emit_type='distortion',
-                  spread=1.2 * FX_STRENGTH)
-        # Exhaust kick backwards.
-        bs.emitfx(position=bpos, velocity=tuple(-c * 12.0 for c in fdir),
-                  count=30, scale=0.8, spread=0.15, chunk_type='spark')
-        _shake(1.6)
-        _snd('super_punch', 1.0, bpos)
-        _snd('big_impact', 1.0, bpos)
-        _snd('swip2', 1.0, bpos)
-        _snd('explosion02', 0.4, bpos)
-        _snd('orchestra_hit_big2', 0.7, bpos)
-        if target is not None:
-            _snd('activate_beep', 0.8, target.position)
+    ppos = node.punch_position
+    _flash(ppos, hot, 0.8, 1.2, 2.0, 0.2)
+    bs.emitfx(position=ppos,
+              velocity=(direction[0] * 10.0, direction[1] * 10.0 + 1.0,
+                        direction[2] * 10.0),
+              count=20, scale=0.8, spread=0.15, chunk_type='spark')
+    _shake(1.0)
+    _snd('super_punch', 1.0, ppos)
+    _snd('swip2', 1.0, ppos)
+    if target is not None:
+        _snd('activate_beep', 0.8, target.position)
 
     state: dict[str, Any] = {
         'time': 0.0,
@@ -390,7 +350,6 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
         'avoid_until': 0.0,
         'avoid_dir': direction,
         'attempt': 0,
-        'released': False,
     }
 
     def _stop() -> None:
@@ -401,22 +360,8 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
         if not bnode or getattr(bomb, '_exploded', False):
             _stop()
             return
+        tnow = state['time']
         bpos = bnode.position
-
-        # Hit-stop: hang in place, trembling.
-        if state['time'] < KICK_HITSTOP:
-            bnode.velocity = tuple(random.uniform(-0.4, 0.4)
-                                   for _ in range(3))
-            state['last'] = bpos
-            return
-        tnow = state['time'] - KICK_HITSTOP  # Flight time.
-        if not state['released']:
-            state['released'] = True
-            if target is not None:
-                state['dir'], _ = _norm(
-                    [a - b for a, b in zip(target.position_center, bpos)]
-                )
-            _release(bpos, state['dir'])
 
         if target is None:
             if tnow > 2.0:
@@ -459,14 +404,8 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
 
         state['last'] = bpos
         bnode.velocity = tuple(c * IMPACT_SPEED for c in fdir)
-        # Blazing trail: sparks, a white vapor streak, shimmering air.
-        bs.emitfx(position=bpos, velocity=tuple(-c * 3.0 for c in fdir),
-                  count=4, scale=0.6, spread=0.1, chunk_type='spark')
-        bs.emitfx(position=bpos, velocity=tuple(-c * 4.0 for c in fdir),
-                  count=1, scale=0.7, spread=0.05, chunk_type='sweat')
-        if random.random() < 0.25:
-            bs.emitfx(position=bpos, emit_type='distortion',
-                      spread=0.4 * FX_STRENGTH)
+        bs.emitfx(position=bpos, velocity=tuple(-c * 2.0 for c in fdir),
+                  count=2, scale=0.5, spread=0.1, chunk_type='spark')
 
     # Kept on the bomb (which the game keeps alive) so it can't be
     # garbage-collected mid-flight.
@@ -562,6 +501,275 @@ def _start_tentacle(bomb: Bomb) -> None:
     bomb._bst_tentacle_timer = bs.Timer(  # type: ignore[attr-defined]
         _TICK, _step, repeat=True
     )
+
+
+# ------------------------------ Charged net -------------------------------
+
+
+def _update_counter(spaz: Spaz) -> None:
+    """Nets show in the counter over the head (mines once out of nets)."""
+    node = spaz.node
+    if not node:
+        return
+    if spaz._bst_nets > 0:
+        node.counter_text = f'x{spaz._bst_nets}'
+        node.counter_texture = _classicassets.textures.powerup_sticky_bombs.get()
+    else:
+        _orig_set_land_mine_count(spaz, spaz.land_mine_count)
+
+
+def _wrap_into_net(spaz: Spaz, bomb: Bomb) -> None:
+    """Charged punch on our sticky bomb: it folds up into a throwable net."""
+    charge = _bomb_charge(bomb) or Spaz.bsm_take_charge(spaz)
+    bpos = bomb.node.position
+    bomb.handlemessage(bs.DieMessage())  # Consumed, never goes off.
+    spaz._bst_nets = min(NET_MAX, spaz._bst_nets + 1)
+    spaz._bst_net_charge += charge
+    _update_counter(spaz)
+
+    bs.emitfx(position=bpos, velocity=(0, 3, 0), count=20, scale=0.7,
+              spread=0.4, chunk_type='slime')
+    _flash(bpos, _NET_COLOR, 0.8, 1.2, 1.5, 0.25)
+    _snd('sticky_impact', 1.0, bpos)
+    _snd('splatter', 0.8, bpos)
+    _snd('powerup01', 0.7, bpos)
+    _popup_text('СЕТЬ!', spaz.node.position, _NET_COLOR)
+
+
+def _draw_net_in_hand(spaz: Spaz) -> Bomb:
+    """The bomb button pulls out a net instead of a bomb."""
+    node = spaz.node
+    spaz._bst_nets -= 1
+    charge, spaz._bst_net_charge = spaz._bst_net_charge, 0.0
+    _update_counter(spaz)
+
+    pos = node.position_forward
+    net = Bomb(
+        position=(pos[0], pos[1], pos[2]),
+        velocity=node.velocity,
+        bomb_type='sticky',
+        bomb_scale=0.9,
+        source_player=spaz.source_player,
+        owner=node,
+    ).autoretain()
+    net._bst_net = {  # type: ignore[attr-defined]
+        'owner': weakref.ref(spaz),
+        'charge': charge,
+        'deployed': False,
+        'thrown': False,
+    }
+    bnode = net.node
+    light = bs.newnode(
+        'light',
+        owner=bnode,
+        attrs={
+            'color': _NET_COLOR,
+            'radius': 0.15,
+            'height_attenuated': False,
+            'volume_intensity_scale': 0.3,
+        },
+    )
+    bnode.connectattr('position', light, 'position')
+    bs.animate(light, 'intensity', {0: 0.3, 0.4: 0.8, 0.8: 0.3}, loop=True)
+
+    def _drip() -> None:
+        if bnode:
+            bs.emitfx(position=bnode.position, velocity=(0, -1, 0), count=1,
+                      scale=0.4, spread=0.05, chunk_type='slime')
+
+    net._bst_drip = bs.Timer(0.2, _drip, repeat=True)  # type: ignore
+    spaz._pick_up(bnode)
+    _snd('sticky_impact', 0.6, pos)
+    return net
+
+
+def _net_thrown(net: Bomb) -> None:
+    """Fly freely; open on touching floor/fighter, or after a while."""
+    info = net._bst_net  # type: ignore[attr-defined]
+    info['thrown'] = True
+    bnode = net.node
+    state = {'time': 0.0}
+
+    def _step() -> None:
+        state['time'] += _TICK
+        if not bnode or info['deployed']:
+            net._bst_net_timer = None  # type: ignore[attr-defined]
+            return
+        if state['time'] > 1.4:
+            _deploy_net(net)
+
+    net._bst_net_timer = bs.Timer(  # type: ignore[attr-defined]
+        _TICK, _step, repeat=True
+    )
+
+
+def _strand(start: Sequence[float], end: Sequence[float],
+            points: int) -> None:
+    """A strand of slime from start to end."""
+    for i in range(1, points + 1):
+        frac = i / (points + 1)
+        bs.emitfx(position=tuple(start[k] + (end[k] - start[k]) * frac
+                                 for k in range(3)),
+                  velocity=(0, 0, 0), count=1, scale=0.3, spread=0.0,
+                  chunk_type='slime')
+
+
+def _deploy_net(net: Bomb) -> None:
+    """The net bursts open: catches enemies, then its corner bombs go off."""
+    info = net._bst_net  # type: ignore[attr-defined]
+    if info['deployed'] or not net.node:
+        return
+    info['deployed'] = True
+    net._bst_net_timer = None  # type: ignore[attr-defined]
+    net._bst_drip = None  # type: ignore[attr-defined]
+    center = net.node.position
+    vel = net.node.velocity
+    net.handlemessage(bs.DieMessage())
+
+    owner_spaz = info['owner']()
+    owner_node = net.owner
+    source = net.get_source_player(bs.Player)
+    radius = NET_RADIUS
+
+    # Burst open: splat, then web rings flung out from the middle.
+    bs.emitfx(position=center, velocity=(0, 4, 0), count=30, scale=0.8,
+              spread=0.6, chunk_type='slime')
+    bs.emitfx(position=center, emit_type='distortion',
+              spread=0.8 * FX_STRENGTH)
+    _snd('splatter', 1.0, center)
+    _snd('sticky_impact', 1.0, center)
+    _snd('swip2', 0.8, center)
+    web: list[bs.Node] = []
+    for frac, delay in ((1.0, 0.0), (0.66, 0.04), (0.33, 0.08)):
+        ring = bs.newnode(
+            'locator',
+            attrs={
+                'shape': 'circleOutline',
+                'position': center,
+                'color': _NET_COLOR,
+                'opacity': 0.55,
+                'draw_beauty': False,
+                'additive': True,
+            },
+        )
+        size = radius * 2.0 * frac
+        bs.animate_array(ring, 'size', 1,
+                         {0: [0.1], delay: [0.1], delay + 0.18: [size * 1.08],
+                          delay + 0.26: [size]})
+        web.append(ring)
+    floor = bs.newnode(
+        'locator',
+        attrs={
+            'shape': 'circle',
+            'position': center,
+            'color': _NET_COLOR,
+            'opacity': 0.12,
+            'draw_beauty': False,
+            'additive': True,
+        },
+    )
+    bs.animate_array(floor, 'size', 1, {0: [0.1], 0.2: [radius * 2.0]})
+    web.append(floor)
+
+    # Four weighted corners: mini sticky bombs, square to the throw.
+    yaw = math.atan2(vel[2], vel[0]) if abs(vel[0]) + abs(vel[2]) > 0.1 else 0
+    corners = []
+    minis = []
+    blast = 1.3 + min(1.0, info['charge'] / 1000.0)  # Charge widens them.
+    for i in range(4):
+        ang = yaw + math.pi / 4 + i * math.pi / 2
+        cpos = (center[0] + math.cos(ang) * radius * 0.85, center[1] + 0.3,
+                center[2] + math.sin(ang) * radius * 0.85)
+        corners.append(cpos)
+        _strand(center, cpos, 4)  # Flung out along a strand.
+        minis.append(
+            Bomb(
+                position=cpos,
+                velocity=(0.0, -1.0, 0.0),
+                bomb_type='sticky',
+                blast_radius=blast,
+                bomb_scale=0.55,
+                source_player=source,
+                owner=owner_node,
+            ).autoretain()
+        )
+    _snd('cork_pop', 1.0, center)
+
+    caught: set = set()
+    state = {'time': 0.0}
+
+    def _is_target(node: bs.Node) -> bool:
+        other = node.getdelegate(Spaz)
+        if other is None or not other.is_alive() or node == owner_node:
+            return False
+        if owner_spaz is not None:
+            return _is_enemy(owner_spaz, other)
+        return True
+
+    def _step() -> None:
+        state['time'] += 0.1
+        # Shimmering web: spokes and the edge between the corner bombs.
+        tick = int(state['time'] * 10 + 0.5)
+        if tick % 2 == 0:
+            for i in range(4):
+                _strand(center, corners[i], 3)
+                _strand(corners[i], corners[(i + 1) % 4], 3)
+        for ring in web:
+            if ring:
+                ring.opacity = (0.12 if ring is floor else
+                                0.4 + 0.15 * math.sin(state['time'] * 9.0))
+        # Catch anyone inside (also those walking in) and reel them in.
+        for node in bs.getnodes():
+            if not node or node.getnodetype() != 'spaz' or not _is_target(
+                node
+            ):
+                continue
+            tpos = node.position_center
+            dx, dz = center[0] - tpos[0], center[2] - tpos[2]
+            if math.hypot(dx, dz) > radius or abs(tpos[1] - center[1]) > 1.6:
+                continue
+            pull, _ = _norm((dx, center[1] - tpos[1], dz))
+            if node not in caught:
+                caught.add(node)
+                left = max(0.2, NET_HOLD - state['time'])
+                node.handlemessage('knockout', left * 1000.0)
+                bs.emitfx(position=tpos, velocity=(0, 2, 0), count=12,
+                          scale=0.6, spread=0.3, chunk_type='slime')
+                _snd('sticky_impact', 1.0, tpos)
+                _snd('splatter', 0.6, tpos)
+            node.handlemessage(
+                'impulse', tpos[0], tpos[1], tpos[2], 0.0, 0.0, 0.0,
+                NET_PULL, NET_PULL * 0.08, 0.0, 0,
+                pull[0], pull[1] + 0.1, pull[2],
+            )
+        if state['time'] >= NET_HOLD:
+            _finish()
+
+    def _finish() -> None:
+        holder['timer'] = None
+        net._bst_net_web = None  # type: ignore[attr-defined]
+        for i, mini in enumerate(minis):
+            bs.timer(0.06 * i,
+                     bs.WeakCallStrict(mini.handlemessage, ExplodeMessage()))
+        for ring in web:
+            if ring:
+                bs.animate(ring, 'opacity', {0: ring.opacity, 0.2: 0.0})
+                bs.timer(0.25, ring.delete)
+
+    # Kept on the (dead) net actor, which our closures keep alive.
+    holder = {'timer': bs.Timer(0.1, _step, repeat=True)}
+    net._bst_net_web = holder  # type: ignore[attr-defined]
+    _NET_WEBS.append(holder)
+
+    def _forget() -> None:
+        if holder in _NET_WEBS:
+            _NET_WEBS.remove(holder)
+
+    bs.timer(NET_HOLD + 0.5, _forget)
+
+
+# Open nets' timers (their bomb actor is gone once the net bursts open).
+_NET_WEBS: list[dict] = []
 
 
 # --------------------------- Ice bomb + charge ----------------------------
@@ -694,6 +902,8 @@ def _patched_init(self: Spaz, *args: Any, **kwargs: Any) -> None:
     self._bst_ice_timer: bs.Timer | None = None
     self._bst_ice_fx_timer: bs.Timer | None = None
     self._bst_old_highlight: Any = None
+    self._bst_nets = 0
+    self._bst_net_charge = 0.0
 
 
 def _patched_handlemessage(self: Spaz, msg: Any) -> Any:
@@ -711,15 +921,18 @@ def _patched_handlemessage(self: Spaz, msg: Any) -> Any:
         bomb = hit.getdelegate(Bomb) if fresh else None
         if (
             bomb is not None
-            and bomb.bomb_type in ('impact', 'ice')
+            and bomb.bomb_type in ('impact', 'ice', 'sticky')
+            and not hasattr(bomb, '_bst_net')
             and _is_own_bomb(self, bomb)
             and (_charged(self) or _bomb_charge(bomb) > 0)
         ):
             self._punched_nodes.add(hit)
             if bomb.bomb_type == 'impact':
                 _launch_impact_bomb(self, bomb)
-            else:
+            elif bomb.bomb_type == 'ice':
                 _absorb_ice_bomb(self, bomb)
+            else:
+                _wrap_into_net(self, bomb)
             return None
 
         # Ice fists: whoever we punch freezes.
@@ -741,6 +954,10 @@ def _patched_handlemessage(self: Spaz, msg: Any) -> Any:
 
 
 def _patched_drop_bomb(self: Spaz) -> Bomb | None:
+    if getattr(self, '_bst_nets', 0) > 0 and self.node and not self.frozen:
+        _draw_net_in_hand(self)
+        # Not a bomb: other plugins/games shouldn't treat it as one.
+        return None
     # Checked before the call: Absorb Shield may spend the charge inside it.
     charged = _charged(self)
     bomb = _orig_drop_bomb(self)
@@ -755,7 +972,34 @@ def _patched_drop_bomb(self: Spaz) -> Bomb | None:
     return bomb
 
 
+def _patched_set_land_mine_count(self: Spaz, count: int) -> None:
+    _orig_set_land_mine_count(self, count)
+    if getattr(self, '_bst_nets', 0) > 0:
+        _update_counter(self)
+
+
 def _patched_bomb_handlemessage(self: Bomb, msg: Any) -> Any:
+    info = getattr(self, '_bst_net', None)
+    if info is not None and not info['deployed']:
+        if isinstance(msg, ExplodeMessage):
+            # A net never explodes; once thrown, a blast just opens it.
+            if info['thrown']:
+                _deploy_net(self)
+            return None
+        if isinstance(msg, bs.DroppedMessage):
+            _net_thrown(self)
+        elif isinstance(msg, bs.PickedUpMessage):
+            info['thrown'] = False
+            self._bst_net_timer = None  # type: ignore[attr-defined]
+        elif isinstance(msg, SplatMessage) and info['thrown']:
+            try:
+                other = bs.getcollision().opposingnode
+            except bs.NotFoundError:
+                other = None
+            if other is not None and other == self.owner:
+                return None  # Brushing past the thrower doesn't count.
+            _deploy_net(self)
+            return None
     result = _orig_bomb_handlemessage(self, msg)
     if getattr(self, '_bst_tentacle_owner', None) is not None:
         if isinstance(msg, bs.DroppedMessage):
@@ -792,14 +1036,17 @@ class BoostersPlugin(babase.Plugin):
 
         global _orig_init, _orig_handlemessage, _orig_drop_bomb
         global _orig_bomb_handle_impact, _orig_bomb_handlemessage
+        global _orig_set_land_mine_count
         _orig_init = Spaz.__init__
         _orig_handlemessage = Spaz.handlemessage
         _orig_drop_bomb = Spaz.drop_bomb
         _orig_bomb_handle_impact = Bomb._handle_impact
         _orig_bomb_handlemessage = Bomb.handlemessage
+        _orig_set_land_mine_count = Spaz.set_land_mine_count
 
         Spaz.__init__ = _patched_init
         Spaz.handlemessage = _patched_handlemessage
         Spaz.drop_bomb = _patched_drop_bomb
         Bomb._handle_impact = _patched_bomb_handle_impact
         Bomb.handlemessage = _patched_bomb_handlemessage
+        Spaz.set_land_mine_count = _patched_set_land_mine_count
