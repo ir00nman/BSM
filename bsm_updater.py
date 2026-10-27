@@ -2,8 +2,8 @@
 """BSM Updater — подтягивает свежие плагины BSM с GitHub.
 
 При каждом запуске игры в фоне сверяет absorb_shield.py и boosters.py с
-публичным репозиторием и, если там новая версия, скачивает её в папку модов
-игры. Новая версия включается при следующем запуске (игра загружает плагины
+публичным репозиторием BSM (ветка main) и, если там новая версия
+(BSM_VERSION), скачивает её в папку модов игры. Новая версия включается при следующем запуске (игра загружает плагины
 только на старте). Копии, встроенные в APK, остаются запасными: без
 интернета играешь на последней скачанной версии.
 """
@@ -19,9 +19,9 @@ import urllib.request
 
 import babase
 
-# Public repo with just the plugin files (its main branch is the release
-# channel).
-RAW_URL = 'https://raw.githubusercontent.com/ir00nman/BSM-plugins/main/'
+# Public repo; only a bumped BSM_VERSION counts as a release, so work in
+# progress on main never reaches players.
+RAW_URL = 'https://raw.githubusercontent.com/ir00nman/BSM/main/'
 FILES = {
     # Downloaded file -> module names that may already be running it.
     'absorb_shield.py': ('absorb_shield', 'bsm_absorb_shield'),
