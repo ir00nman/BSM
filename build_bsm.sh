@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Собирает BSM.apk из оригинального BombSquad APK со встроенным модом.
+# Собирает BSM.apk из оригинального BombSquad APK со встроенными модами.
 #
 #   BSM_KEYSTORE_PASS=... ./build_bsm.sh BombSquad_Android_Generic_1.8.5.apk [BSM.apk]
 #
@@ -34,9 +34,10 @@ perl -pi -e 's/net\.froemling\.bombsquad(?=["\.])(?!\.(App|MainActivity)")/net.f
 grep -rl '<string name="app_name_bombsquad">' "$work/dec/res" | xargs perl -pi -e \
   's#<string name="app_name_bombsquad">[^<]*</string>#<string name="app_name_bombsquad">BSM</string>#'
 
-# Мод встроен в игру: копировать в папку mods ничего не нужно.
-cp "$here/absorb_shield.py" \
-  "$work/dec/assets/ballistica_files/ba_data/python/bsm_absorb_shield.py"
+# Моды встроены в игру: копировать в папку mods ничего не нужно.
+pydir="$work/dec/assets/ballistica_files/ba_data/python"
+cp "$here/absorb_shield.py" "$pydir/bsm_absorb_shield.py"
+cp "$here/boosters.py" "$pydir/bsm_boosters.py"
 
 apktool b -o "$work/unsigned.apk" "$work/dec"
 zipalign -f -P 16 4 "$work/unsigned.apk" "$work/aligned.apk"

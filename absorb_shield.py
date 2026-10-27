@@ -6,9 +6,8 @@
 копится в заряд, и боец светится основным цветом своего скина. Следующая
 атака выпускает заряд:
   * удар кулаком — весь заряд входит в этот же удар (один удар, а не два);
-  * заряженный удар по бомбе, когда в направлении удара есть противник, —
-    бомба-болванка летит в него и бьёт всем зарядом (ударная бомба и мина
-    при этом взрываются);
+  * ракета и пинок своей бомбы из плагина BSM Boosters тоже забирают
+    заряд (плагины стакаются друг с другом);
   * бомба — бомба светится и при взрыве бьёт всех вокруг накопленным уроном;
     заряженная ледяная бомба вдобавок пускает морозную волну, которая
     замораживает всех в большом радиусе.
@@ -33,7 +32,7 @@ from typing import TYPE_CHECKING
 import babase
 import bascenev1 as bs
 from bascenev1 import _classicassets
-from bascenev1lib.actor.bomb import Bomb, ExplodeMessage
+from bascenev1lib.actor.bomb import Bomb
 from bascenev1lib.actor.playerspaz import PlayerSpaz
 from bascenev1lib.actor.spaz import PunchHitMessage, Spaz
 
@@ -65,19 +64,18 @@ FROST_WAVE_SPEED = 12.0  # Скорость фронта волны (метро�
 ABSORB_GRACE = 0.25  # Щит продлевается на столько после каждого поглощения
 #                     (чтобы цепочка взрывов нескольких бомб впиталась целиком).
 SHIELD_MAX_TIME = 1.2  # Предел длительности щита вместе с продлениями.
-SLUG_RANGE = 15.0  # Дальность бомбы-болванки (метров).
-SLUG_ANGLE = 40.0  # Насколько цель может быть в стороне от удара (градусов).
-SLUG_SPEED = 24.0  # Скорость полёта болванки (м/с).
 
 # --------------------------------------------------------------------------
 
 _DAMAGE_SCALE = 0.22  # Как в Spaz: node.damage -> очки урона.
 
-_orig_init = Spaz.__init__
-_orig_handlemessage = Spaz.handlemessage
-_orig_pickup_press = Spaz.on_pickup_press
-_orig_hold_position_press = Spaz.on_hold_position_press
-_orig_drop_bomb = Spaz.drop_bomb
+# Captured when the plugin switches on (not at import), so plugins that
+# patch the same Spaz methods chain instead of overwriting each other.
+_orig_init: Any = None
+_orig_handlemessage: Any = None
+_orig_pickup_press: Any = None
+_orig_hold_position_press: Any = None
+_orig_drop_bomb: Any = None
 
 # A charged punch in flight: the victim folds the bonus into the punch's
 # own HitMessage so the release lands as a single hit.
@@ -617,182 +615,59 @@ def _merge_bonus(victim: Spaz, msg: bs.HitMessage, bonus: float,
     msg.flat_damage = total / max(victim.impact_scale, 0.01)
 
 
+def _sonic_boom(pos: Sequence[float], direction: Sequence[float],
+                color: Sequence[float], power: float) -> None:
+    """A fist breaking the sound barrier: shock rings, vapor cone, sparks."""
+    dlen = math.sqrt(sum(c * c for c in direction))
+    if dlen < 0.01:
+        direction, dlen = (1.0, 0.0, 0.0), 1.0
+    fx, fy, fz = (c / dlen for c in direction)
+    power = max(0.3, min(2.0, power))
+
+    # White-hot core and a short colored bloom.
+    _flash(pos, (1.6, 1.6, 1.6), 0.5, 0.0, 0.0, 0.05)
+    _flash(pos, _bright(color, 2.0), 0.9, 1.6, 2.5, 0.2)
+
+    # Shock bubbles chasing the fist forward: the "barrier" breaking.
+    for i in range(3):
+        step = 0.3 + 0.3 * i
+        bs.timer(
+            0.025 * i,
+            bs.CallStrict(
+                bs.emitfx,
+                position=(pos[0] + fx * step, pos[1] + fy * step,
+                          pos[2] + fz * step),
+                emit_type='distortion',
+                spread=(0.6 + 0.4 * i) * FX_STRENGTH * power,
+            ),
+        )
+
+    # Vapor cone: white mist thrown forward and out.
+    bs.emitfx(position=pos, velocity=(fx * 9.0, fy * 9.0 + 1.0, fz * 9.0),
+              count=int(25 * power), scale=0.7, spread=0.45,
+              chunk_type='sweat')
+    bs.emitfx(position=pos, velocity=(fx * 4.0, fy * 4.0, fz * 4.0),
+              count=2, emit_type='tendrils', tendril_type='thin_smoke')
+
+    # Sparks streaking ahead of the punch.
+    bs.emitfx(position=pos, velocity=(fx * 14.0, fy * 14.0 + 1.0, fz * 14.0),
+              count=int(30 * power), scale=0.9, spread=0.15,
+              chunk_type='spark')
+    _sparks(pos, int(15 * power), vel=(fx * 4.0, 3.0, fz * 4.0), spread=0.6,
+            scale=0.8)
+
+    _shake(0.8 + power)
+    _snd('big_impact', 1.0, pos)
+    _snd('explosion02', 0.35, pos)  # The boom.
+    _snd('swish', 1.0, pos)
+
+
 def _release_punch_fx(spaz: Spaz, amount: float) -> None:
     node = spaz.node
-    col = _color(spaz)
-    hot = _bright(col, 2.0)
-    ppos = node.punch_position
-    pdir = node.punch_velocity
-    expl = bs.newnode(
-        'explosion',
-        attrs={'position': ppos,
-               'radius': (0.5 + min(0.8, amount / 1500.0)) * FX_STRENGTH,
-               'color': col},
-    )
-    bs.timer(1.0, expl.delete)
-    _flash(ppos, hot, 1.0, 2.5, 3.0, 0.35)
-    _ring(ppos, hot, 3.5, 0.3)
-    _sparks(ppos, min(60, 20 + int(amount * 0.03)),
-            vel=(pdir[0] * 3.0, pdir[1] * 3.0 + 2.0, pdir[2] * 3.0),
-            spread=0.5, scale=1.2)
-    _shake(1.0 + min(2.0, amount / 800.0))
     # The punch itself already plays the super-punch sound.
-    _snd('big_impact', 1.0, ppos)
-    _snd('orchestra_hit_big2', 0.8, ppos)
-
-
-# ------------------------------ Bomb slug ---------------------------------
-
-
-def _find_slug_target(spaz: Spaz, bpos: Sequence[float]) -> bs.Node | None:
-    """Closest living fighter roughly in the direction of the punch."""
-    node = spaz.node
-    pdir = node.punch_velocity
-    dx, dz = pdir[0], pdir[2]
-    if math.hypot(dx, dz) < 0.1:
-        dx, dz = bpos[0] - node.position[0], bpos[2] - node.position[2]
-    plen = math.hypot(dx, dz)
-    if plen < 0.01:
-        return None
-    dx, dz = dx / plen, dz / plen
-    min_cos = math.cos(math.radians(SLUG_ANGLE))
-
-    best: bs.Node | None = None
-    best_score = 0.0
-    for target in bs.getnodes():
-        if not target or target == node or target.getnodetype() != 'spaz':
-            continue
-        victim = target.getdelegate(Spaz)
-        if victim is None or not victim.is_alive():
-            continue
-        tpos = target.position_center
-        tx, tz = tpos[0] - bpos[0], tpos[2] - bpos[2]
-        dist = math.hypot(tx, tz)
-        if dist < 0.01 or dist > SLUG_RANGE:
-            continue
-        cos = (tx * dx + tz * dz) / dist
-        if cos < min_cos:
-            continue
-        score = dist / cos  # Prefer close and straight ahead.
-        if best is None or score < best_score:
-            best, best_score = target, score
-    return best
-
-
-def _launch_slug(spaz: Spaz, bomb: Bomb, target: bs.Node) -> None:
-    """Charged punch on a bomb: it flies into the target like a slug."""
-    amount = _take_charge(spaz)
-    node = spaz.node
-    bnode = bomb.node
-    col = _color(spaz)
-    hot = _bright(col, 2.0)
-    source = bs.existing(spaz.source_player)
-
-    # Ours now: don't blow up on our own fist, kills are credited to us.
-    bomb.owner = node
-    if source is not None:
-        bomb._source_player = source  # pylint: disable=protected-access
-
-    ppos = node.punch_position
-    _flash(ppos, hot, 1.0, 2.0, 3.0, 0.3)
-    _ring(ppos, hot, 3.0, 0.25)
-    _sparks(ppos, 30, vel=(0, 3, 0), spread=0.4, scale=1.0)
-    _shake(1.0)
-    _snd('super_punch', 1.0, ppos)
-    _snd('big_impact', 0.8, ppos)
-    _snd('swip2', 1.0, ppos)
-
-    light = bs.newnode(
-        'light',
-        owner=bnode,
-        attrs={
-            'color': col,
-            'radius': 0.2,
-            'intensity': 1.5 * FX_STRENGTH + 0.5,
-            'height_attenuated': False,
-            'volume_intensity_scale': 0.5,
-        },
-    )
-    bnode.connectattr('position', light, 'position')
-
-    tick = 0.03
-    state = {'time': 0.0}
-
-    def _step() -> None:
-        state['time'] += tick
-        if not bnode or not target or state['time'] > 1.5:
-            _stop()
-            return
-        victim = target.getdelegate(Spaz)
-        if victim is None or not victim.is_alive():
-            _stop()
-            return
-        bpos = bnode.position
-        tpos = target.position_center
-        vx, vy, vz = tpos[0] - bpos[0], tpos[1] - bpos[1], tpos[2] - bpos[2]
-        dist = math.sqrt(vx * vx + vy * vy + vz * vz)
-        fdir = (vx / max(dist, 0.01), vy / max(dist, 0.01),
-                vz / max(dist, 0.01))
-        if dist < 0.9 + SLUG_SPEED * tick:
-            _impact(fdir)
-            return
-        bnode.velocity = (fdir[0] * SLUG_SPEED, fdir[1] * SLUG_SPEED,
-                          fdir[2] * SLUG_SPEED)
-        bs.emitfx(position=bpos, velocity=(0, 1, 0), count=3, scale=0.6,
-                  spread=0.1, chunk_type='spark')
-
-    def _impact(fdir: Sequence[float]) -> None:
-        _stop()
-        bpos = bnode.position
-        if amount > 0:
-            target.handlemessage(
-                bs.HitMessage(
-                    pos=bpos,
-                    srcnode=node if node else None,
-                    source_player=bs.existing(source),
-                    force_direction=fdir,
-                    flat_damage=amount,
-                    hit_type='punch',
-                    hit_subtype='super_punch',
-                )
-            )
-            victim = target.getdelegate(Spaz)
-            if (
-                victim is not None
-                and victim.shield is None
-                and not getattr(victim, '_ab_active', False)
-            ):
-                _knock(target, bpos, fdir, amount)
-        # Bounce off.
-        bnode.velocity = (-fdir[0] * 3.0, 4.0, -fdir[2] * 3.0)
-        expl = bs.newnode(
-            'explosion',
-            attrs={'position': bpos,
-                   'radius': (0.5 + min(0.8, amount / 1500.0)) * FX_STRENGTH,
-                   'color': col},
-        )
-        bs.timer(1.0, expl.delete)
-        _flash(bpos, hot, 1.0, 2.5, 3.0, 0.35)
-        _sparks(bpos, min(60, 20 + int(amount * 0.03)),
-                vel=(fdir[0] * 3.0, 3.0, fdir[2] * 3.0), spread=0.5,
-                scale=1.2)
-        _shake(1.0 + min(2.0, amount / 800.0))
-        _snd('big_impact', 1.0, bpos)
-        _snd('orchestra_hit_big2', 0.8, bpos)
-        # Contact bombs go off on touching the living.
-        if bomb.bomb_type in ('impact', 'land_mine'):
-            bomb.handlemessage(ExplodeMessage())
-
-    def _stop() -> None:
-        bomb._ab_slug_timer = None  # type: ignore[attr-defined]
-        if light:
-            light.delete()
-
-    # Kept on the bomb (which the game keeps alive) so it can't be
-    # garbage-collected mid-flight.
-    bomb._ab_slug_timer = bs.Timer(  # type: ignore[attr-defined]
-        tick, _step, repeat=True
-    )
+    _sonic_boom(node.punch_position, node.punch_velocity, _color(spaz),
+                0.5 + amount / 1000.0)
+    _snd('orchestra_hit_big2', 0.6, node.punch_position)
 
 
 def _freeze_node(target: bs.Node) -> None:
@@ -1064,23 +939,6 @@ def _patched_handlemessage(self: Spaz, msg: Any) -> Any:
             return None
 
     if isinstance(msg, PunchHitMessage) and self._ab_stored > 0 and self.node:
-        try:
-            target = bs.getcollision().opposingnode
-        except bs.NotFoundError:
-            target = None
-        fresh = (
-            target is not None
-            and target not in self._punched_nodes  # pylint: disable=W0212
-        )
-        # Charged punch on a bomb with someone ahead: launch it at them.
-        bomb = target.getdelegate(Bomb) if fresh else None
-        if bomb is not None and bomb.node:
-            slug_target = _find_slug_target(self, bomb.node.position)
-            if slug_target is not None:
-                self._punched_nodes.add(target)  # pylint: disable=W0212
-                _launch_slug(self, bomb, slug_target)
-                return None
-
         pend = {
             'src': self.node,
             'amount': self._ab_stored * RELEASE_MULT,
@@ -1129,6 +987,21 @@ def _patched_drop_bomb(self: Spaz) -> Bomb | None:
     return bomb
 
 
+def _hook_take_charge(spaz: Spaz) -> float:
+    """Spend the whole charge (with its glow); returns the damage."""
+    if getattr(spaz, '_ab_stored', 0) <= 0:
+        return 0.0
+    return _take_charge(spaz)
+
+
+def _hook_charge_projectile(spaz: Spaz, projectile: Any) -> bool:
+    """Put the charge into a bomb-like projectile; True if it had one."""
+    if getattr(spaz, '_ab_stored', 0) <= 0 or not spaz.node:
+        return False
+    _power_up_bomb(spaz, projectile)
+    return True
+
+
 # ba_meta export babase.Plugin
 class AbsorbShieldPlugin(babase.Plugin):
     """Parry shield that absorbs damage and returns it with the next hit."""
@@ -1139,6 +1012,19 @@ class AbsorbShieldPlugin(babase.Plugin):
         if getattr(Spaz, '_ab_patched', False):
             return
         Spaz._ab_patched = True  # type: ignore[attr-defined]
+
+        global _orig_init, _orig_handlemessage, _orig_pickup_press
+        global _orig_hold_position_press, _orig_drop_bomb
+        _orig_init = Spaz.__init__
+        _orig_handlemessage = Spaz.handlemessage
+        _orig_pickup_press = Spaz.on_pickup_press
+        _orig_hold_position_press = Spaz.on_hold_position_press
+        _orig_drop_bomb = Spaz.drop_bomb
+
+        # Hooks other BSM plugins use to spend the charge (see boosters.py).
+        Spaz.bsm_take_charge = staticmethod(_hook_take_charge)
+        Spaz.bsm_charge_projectile = staticmethod(_hook_charge_projectile)
+
         Spaz.__init__ = _patched_init
         Spaz.handlemessage = _patched_handlemessage
         Spaz.on_pickup_press = _patched_pickup_press
