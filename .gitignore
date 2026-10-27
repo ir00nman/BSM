@@ -1,0 +1,11 @@
+# Сборки: больше лимита GitHub в 100 МБ.
+*.apk
+*.idsig
+
+# Ключ подписи и пароль — никогда не коммитить.
+*.keystore
+bsm-keystore.txt
+
+__pycache__/
+*.pyc
+.DS_Store
