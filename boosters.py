@@ -22,14 +22,15 @@
     получает ледяные кулаки: каждый удар замораживает. Чем больше был заряд,
     тем дольше они держатся;
   * заряженная ледяная бомба, которую просто выкинули, вдобавок к морозной
-    волне щита разбрасывает 3 ледяные мини-бомбы, которые взрываются одна за
-    другой вскоре после основной.
+    волне щита мягко выбрасывает вокруг 3 ледяные мини-бомбы (светятся,
+    падают метрах в двух, взрыв обычного радиуса), которые взрываются одна
+    за другой вскоре после основной.
 
 Липкая бомба, заряжен:
   * брошенная заряженная липкая бомба шевелит щупальцами из слизи и
     хватает ВСЕХ врагов в радиусе 3.5 м (и тех, кто зайдёт позже) — на
-    каждого своё щупальце; подтягивает их к бомбе, пока не прилипнут, а
-    потом обвивает;
+    каждого своё щупальце; бомба и враги притягиваются друг к другу
+    (лёгкая бомба летит быстрее), пока не слипнутся, а потом обвивает;
   * удар кулаком по своей липкой бомбе — она превращается в щупальце
     (1 шт., до 3). Кнопка «Бомба» выстреливает его из руки вперёд (до 8 м):
     оно доворачивает к ближайшему врагу перед бойцом (до 40°), а если такого
@@ -608,8 +609,9 @@ def _start_tentacle(bomb: Bomb) -> None:
                           chunk_type='slime')
         victims = list(grabbed)
 
-        # Reel in everyone not yet stuck to the bomb (before any visuals, so
-        # a drawing hiccup can never stop the pull).
+        # Bomb and victims pull on each other (before any visuals, so a
+        # drawing hiccup can never stop it). Equal and opposite impulses:
+        # the physics divides by mass, so the light bomb moves the most.
         for node in victims:
             if grabbed[node]:
                 continue
@@ -623,6 +625,11 @@ def _start_tentacle(bomb: Bomb) -> None:
                 'impulse', tpos[0], tpos[1], tpos[2], 0.0, 0.0, 0.0,
                 TENTACLE_PULL, TENTACLE_PULL * 0.08, 0.0, 0,
                 pull[0], pull[1] + 0.3, pull[2],
+            )
+            bnode.handlemessage(
+                'impulse', bpos[0], bpos[1], bpos[2], 0.0, 0.0, 0.0,
+                TENTACLE_PULL, TENTACLE_PULL * 0.08, 0.0, 0,
+                -pull[0], -pull[1] + 0.1, -pull[2],
             )
 
         try:
@@ -930,15 +937,27 @@ def _ice_burst(thrower: bs.Node | None, bomb: Bomb, blast: Blast) -> None:
     base = random.uniform(0, 2 * math.pi)
     for i in range(ICE_MINI_BOMBS):
         ang = base + 2 * math.pi * i / max(1, ICE_MINI_BOMBS)
+        # A gentle toss (lands ~2 m out), standard ice-bomb blast radius.
         mini = Bomb(
             position=(pos[0], pos[1] + 0.4, pos[2]),
-            velocity=(math.cos(ang) * 6.0, 6.0, math.sin(ang) * 6.0),
+            velocity=(math.cos(ang) * 2.5, 4.0, math.sin(ang) * 2.5),
             bomb_type='ice',
-            blast_radius=1.0,
-            bomb_scale=0.55,
+            bomb_scale=0.75,
             source_player=source,
             owner=thrower,
         ).autoretain()
+        glow = bs.newnode(
+            'light',
+            owner=mini.node,
+            attrs={
+                'color': _ICE,
+                'radius': 0.12,
+                'intensity': 0.6,
+                'height_attenuated': False,
+                'volume_intensity_scale': 0.3,
+            },
+        )
+        mini.node.connectattr('position', glow, 'position')
         bs.timer(ICE_MINI_DELAY + ICE_MINI_STAGGER * i,
                  bs.WeakCallStrict(mini.handlemessage, ExplodeMessage()))
 
