@@ -41,6 +41,9 @@ if TYPE_CHECKING:
 
     from bascenev1lib.actor.bomb import Blast
 
+# Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
+BSM_VERSION = '2.5'
+
 # ------------------------------- Настройки --------------------------------
 
 SHIELD_TIME = 0.4  # Сколько секунд держится щит.
@@ -113,6 +116,15 @@ def _snd(name: str, volume: float = 1.0, pos: Sequence[float] | None = None):
         sound.play(volume)
     else:
         sound.play(volume, position=pos)
+
+
+def _seq(pos: Sequence[float] | None, *steps: tuple) -> None:
+    """A layered sound cue: (delay, sound name, volume) steps."""
+    for delay, name, volume in steps:
+        if delay <= 0:
+            _snd(name, volume, pos)
+        else:
+            bs.timer(delay, bs.CallStrict(_snd, name, volume, pos))
 
 
 def _bright(color: Sequence[float], scale: float = 1.0) -> tuple:
@@ -313,8 +325,9 @@ def _activate_shield(spaz: Spaz) -> None:
     _flash(pos, hot, 0.9, 1.0, 1.4, duration=SHIELD_TIME)
     _ring(node.position, col, 3.2, 0.3, owner=node)
     _sparks(pos, 12, spread=0.4, scale=0.6)
-    _snd('shield_up', 0.9, pos)
-    _snd('swip2', 0.8, pos)
+    # Whoosh + energy hum rising, a tiny glint on top.
+    _seq(pos, (0, 'swip2', 0.7), (0, 'shield_up', 0.9), (0.03, 'laser', 0.25),
+         (0.07, 'ding_small_high', 0.25))
 
     spaz._ab_shield_timer = bs.Timer(
         SHIELD_TIME, _wcall(_end_shield, spaz)
@@ -345,7 +358,8 @@ def _end_shield(spaz: Spaz) -> None:
         _add_charge(spaz, spaz._ab_absorbed)
     else:
         # Miss: shield fizzles quietly.
-        _snd('shield_down', 0.35, node.position)
+        _seq(node.position, (0, 'shield_down', 0.4),
+             (0.05, 'laser_reverse', 0.2))
 
 
 def _calc_damage(spaz: Spaz, msg: bs.HitMessage) -> float:
@@ -438,12 +452,15 @@ def _absorb_hit(spaz: Spaz, msg: bs.HitMessage) -> None:
     _ring(node.position, hot, 4.0, 0.35, owner=node)
     _sparks(hitpos, min(40, 12 + int(damage * 0.03)), spread=0.8, scale=0.9)
     _shake(0.6)
-    _snd('block', 1.0, hitpos)
-    _snd('shield_hit', 1.0, hitpos)
+    _seq(hitpos, (0, 'block', 1.0), (0, 'shield_hit', 0.9))
+    if damage >= 300:
+        _seq(hitpos, (0, 'metal_hit', 0.6), (0.02, 'impact_hard', 0.5))
+    if damage >= 600:
+        _seq(hitpos, (0.03, 'gong', 0.35))
     if first:
-        # The "perfect parry" sting.
-        _snd('orchestra_hit', 0.9, hitpos)
-        _snd('ding_small_high', 0.8, hitpos)
+        # The "perfect parry" sting, ringing out.
+        _seq(hitpos, (0, 'orchestra_hit', 0.8), (0.05, 'ding_small_high', 0.7),
+             (0.12, 'bell_high', 0.5))
         _popup_text('БЛОК!', node.position, hot, big=True)
 
 
@@ -454,8 +471,10 @@ def _add_charge(spaz: Spaz, amount: float) -> None:
     spaz._ab_stored = min(MAX_STORED, spaz._ab_stored + amount)
     node = spaz.node
     col = _color(spaz)
-    _snd('powerup01', 0.9, node.position)
-    _snd('laser', 0.5, node.position)
+    # Charged: a rising bell arpeggio over the power-up.
+    _seq(node.position, (0, 'powerup01', 0.7), (0.04, 'laser', 0.3),
+         (0, 'bell_low', 0.5), (0.08, 'bell_med', 0.5),
+         (0.16, 'bell_high', 0.6))
     _flash(node.position_center, _bright(col, 1.5), 1.2, 1.2, 1.5, 0.4)
     _start_glow(spaz)
     spaz._ab_charge_timer = bs.Timer(
@@ -572,7 +591,8 @@ def _charge_expired(spaz: Spaz) -> None:
     _take_charge(spaz)
     node = spaz.node
     if node:
-        _snd('shield_down', 0.8, node.position)
+        _seq(node.position, (0, 'shield_down', 0.8),
+             (0, 'laser_reverse', 0.5), (0.1, 'bell_low', 0.3))
         _sparks(node.position_center, 20, spread=0.5, scale=0.7)
 
 
@@ -771,13 +791,13 @@ def _release_punch_fx(spaz: Spaz, amount: float,
 
     _shake(0.8 + 0.8 * power)
     # The punch itself already plays the super-punch sound.
-    _snd('big_impact', 1.0, center)
-    _snd('punch_strong02', 1.0, center)
-    _snd('explosion02', 0.45, center)  # The boom.
-    _snd('swish', 0.9, center)
-    _snd('orchestra_hit_big2', 0.6, center)
+    # Crack of the hit, the boom rolling out, debris settling.
+    _seq(center, (0, 'big_impact', 1.0), (0, 'punch_strong02', 1.0),
+         (0, 'swish', 0.9), (0.02, 'big_impact2', 0.7),
+         (0.04, 'explosion02', 0.45), (0.06, 'orchestra_hit_big2', 0.6),
+         (0.16, 'debris_fall', 0.35))
     if amount >= 600:
-        _snd('cymbal', 0.4, center)
+        _seq(center, (0, 'cymbal', 0.4), (0.1, 'gong', 0.3))
 
 
 def _freeze_node(target: bs.Node) -> None:
@@ -788,7 +808,7 @@ def _freeze_node(target: bs.Node) -> None:
     bs.emitfx(position=tpos, velocity=(0, 3, 0), count=12, scale=0.6,
               spread=0.5, chunk_type='ice')
     _flash(tpos, (0.6, 0.9, 1.8), 0.6, 0.8, 1.5, 0.3)
-    _snd('freeze', 1.0, tpos)
+    _seq(tpos, (0, 'freeze', 1.0), (0.05, 'ding_small_high', 0.3))
 
 
 def _frost_wave(pos: Sequence[float], owner: bs.Node | None,
@@ -839,9 +859,10 @@ def _frost_wave(pos: Sequence[float], owner: bs.Node | None,
     bs.emitfx(position=pos, emit_type='distortion', spread=radius * 0.5)
     bs.emitfx(position=pos, velocity=(0, 6, 0), count=40, scale=0.8,
               spread=1.5, chunk_type='ice')
-    _snd('freeze', 1.0, pos)
-    _snd('hiss', 1.0, pos)
-    _snd('orchestra_hit3', 0.8, pos)
+    # Frost: the freeze and hiss, then crystals chiming outwards.
+    _seq(pos, (0, 'freeze', 1.0), (0, 'hiss', 1.0), (0, 'orchestra_hit3', 0.8),
+         (0.1, 'ding_small_high', 0.5), (0.2, 'ding_small', 0.4),
+         (0.32, 'ding_small_high', 0.35), (0.45, 'bell_high', 0.3))
 
     # Ice shards along the wave front.
     def _emit_front(rad: float) -> None:
@@ -956,8 +977,8 @@ def _power_up_bomb(spaz: Spaz, bomb: Bomb) -> None:
         trail.append(bs.Timer(0.08, _trail, repeat=True))
 
     _flash(bomb.node.position, hot, 0.6, 1.0, 1.5, 0.3)
-    _snd('powerup01', 0.9, bomb.node.position)
-    _snd('laser_reverse', 0.7, bomb.node.position)
+    _seq(bomb.node.position, (0, 'powerup01', 0.8),
+         (0, 'laser_reverse', 0.6), (0.1, 'bell_med', 0.4))
 
     def _on_explode(bmb: Bomb, blast: Blast) -> None:
         trail.clear()
@@ -978,8 +999,8 @@ def _power_up_bomb(spaz: Spaz, bomb: Bomb) -> None:
         bs.emitfx(position=pos, emit_type='distortion',
                   spread=radius * FX_STRENGTH)
         _shake(2.0 + min(3.0, amount / 600.0))
-        _snd('explosion05', 1.0, pos)
-        _snd('orchestra_hit_big1', 0.9, pos)
+        _seq(pos, (0, 'explosion05', 1.0), (0, 'orchestra_hit_big1', 0.9),
+             (0.05, 'big_impact2', 0.6), (0.12, 'debris_fall', 0.5))
 
         for target in bs.getnodes():
             if not target or target == owner:

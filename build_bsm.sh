@@ -38,6 +38,7 @@ grep -rl '<string name="app_name_bombsquad">' "$work/dec/res" | xargs perl -pi -
 pydir="$work/dec/assets/ballistica_files/ba_data/python"
 cp "$here/absorb_shield.py" "$pydir/bsm_absorb_shield.py"
 cp "$here/boosters.py" "$pydir/bsm_boosters.py"
+cp "$here/bsm_updater.py" "$pydir/bsm_updater.py"
 
 apktool b -o "$work/unsigned.apk" "$work/dec"
 zipalign -f -P 16 4 "$work/unsigned.apk" "$work/aligned.apk"

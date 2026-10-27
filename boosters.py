@@ -61,6 +61,9 @@ if TYPE_CHECKING:
 
     from bascenev1lib.actor.bomb import Blast
 
+# Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
+BSM_VERSION = '2.5'
+
 # ------------------------------- Настройки --------------------------------
 
 IMPACT_SPEED = 22.0  # Скорость ударной бомбы после удара (м/с).
@@ -126,6 +129,15 @@ def _snd(name: str, volume: float = 1.0, pos: Sequence[float] | None = None):
         sound.play(volume)
     else:
         sound.play(volume, position=pos)
+
+
+def _seq(pos: Sequence[float] | None, *steps: tuple) -> None:
+    """A layered sound cue: (delay, sound name, volume) steps."""
+    for delay, name, volume in steps:
+        if delay <= 0:
+            _snd(name, volume, pos)
+        else:
+            bs.timer(delay, bs.CallStrict(_snd, name, volume, pos))
 
 
 def _bright(color: Sequence[float], scale: float = 1.0) -> tuple:
@@ -336,10 +348,11 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
                         direction[2] * 10.0),
               count=20, scale=0.8, spread=0.15, chunk_type='spark')
     _shake(1.0)
-    _snd('super_punch', 1.0, ppos)
-    _snd('swip2', 1.0, ppos)
-    if target is not None:
-        _snd('activate_beep', 0.8, target.position)
+    _seq(ppos, (0, 'super_punch', 1.0), (0, 'swip2', 1.0),
+         (0.02, 'laser_reverse', 0.6))
+    if target is not None:  # Lock-on chirp at the target.
+        _seq(target.position, (0, 'activate_beep', 0.8),
+             (0.08, 'race_beep1', 0.5))
 
     state: dict[str, Any] = {
         'time': 0.0,
@@ -582,7 +595,7 @@ def _start_tentacle(bomb: Bomb) -> None:
     # Grabbed enemies, in order of capture: node -> reeled in yet?
     grabbed: dict = {}
     state = {'time': 0.0}
-    _snd('sticky_impact', 0.6, start)
+    _seq(start, (0, 'sticky_impact', 0.6), (0.05, 'swip', 0.4))
 
     def _step() -> None:
         state['time'] += _TICK
@@ -601,9 +614,10 @@ def _start_tentacle(bomb: Bomb) -> None:
         for node in _tentacle_targets(spaz, bpos):
             if node not in grabbed:
                 grabbed[node] = False
-                _snd('sticky_impact', 1.0, bpos)
-                _snd('splatter', 0.8, node.position)
-                _snd('swip', 0.8, bpos)
+                # Lash, slap, squelch.
+                _seq(bpos, (0, 'swip', 0.8), (0, 'sticky_impact', 1.0))
+                _seq(node.position, (0.04, 'splatter', 0.8),
+                     (0.06, 'cork_pop', 0.4))
                 bs.emitfx(position=node.position_center, velocity=(0, 2, 0),
                           count=12, scale=0.6, spread=0.3,
                           chunk_type='slime')
@@ -619,7 +633,7 @@ def _start_tentacle(bomb: Bomb) -> None:
             pull, dist = _norm([a - b for a, b in zip(bpos, tpos)])
             if dist < 0.9:
                 grabbed[node] = True  # Got them: hold on until it blows.
-                _snd('sticky_impact', 1.0, bpos)
+                _seq(bpos, (0, 'sticky_impact', 1.0), (0.03, 'splatter', 0.6))
                 continue
             node.handlemessage(
                 'impulse', tpos[0], tpos[1], tpos[2], 0.0, 0.0, 0.0,
@@ -671,9 +685,9 @@ def _wrap_into_whip(spaz: Spaz, bomb: Bomb) -> None:
     bs.emitfx(position=bpos, velocity=(0, 3, 0), count=20, scale=0.7,
               spread=0.4, chunk_type='slime')
     _flash(bpos, _SLIME, 0.8, 1.2, 1.5, 0.25)
-    _snd('sticky_impact', 1.0, bpos)
-    _snd('splatter', 0.8, bpos)
-    _snd('powerup01', 0.7, bpos)
+    _seq(bpos, (0, 'sticky_impact', 1.0), (0, 'splatter', 0.8),
+         (0.05, 'powerup01', 0.7), (0.1, 'bell_low', 0.4),
+         (0.18, 'bell_med', 0.4))
     _popup_text('ЩУПАЛЬЦЕ!', spaz.node.position, _SLIME)
 
 
@@ -728,8 +742,9 @@ def _fire_whip(spaz: Spaz) -> None:
     source = spaz.source_player
     state: dict[str, Any] = {'time': 0.0, 'phase': 'out', 'tip': start,
                              'victim': None}
-    _snd('swip2', 1.0, start)
-    _snd('sticky_impact', 0.7, start)
+    # The lash: whip crack and a wet whoosh.
+    _seq(start, (0, 'swip2', 1.0), (0, 'swish', 0.8), (0.02, 'laser', 0.2),
+         (0.03, 'sticky_impact', 0.7))
 
     def _finish() -> None:
         spaz._bst_whip_active = False
@@ -744,9 +759,12 @@ def _fire_whip(spaz: Spaz) -> None:
         victim_node.handlemessage('knockout', (WHIP_FUSE + 0.2) * 1000.0)
         bs.emitfx(position=vpos, velocity=(0, 3, 0), count=20, scale=0.7,
                   spread=0.4, chunk_type='slime')
-        _snd('splatter', 1.0, vpos)
-        _snd('sticky_impact', 1.0, vpos)
-        _snd('cork_pop', 1.0, vpos)
+        _seq(vpos, (0, 'splatter', 1.0), (0, 'sticky_impact', 1.0),
+             (0.05, 'cork_pop', 0.9), (0.1, 'cork_pop', 0.7))
+        # Countdown ticks before the four minis go off.
+        _seq(vpos, (WHIP_FUSE - 0.45, 'tick', 0.8),
+             (WHIP_FUSE - 0.3, 'tick', 0.8), (WHIP_FUSE - 0.15, 'warn_beep',
+                                               0.7))
         # Four mini sticky bombs slap onto them from all sides.
         blast = 1.2 + min(1.0, charge / 1000.0)  # Charge widens them.
         for i in range(4):
@@ -805,7 +823,7 @@ def _fire_whip(spaz: Spaz) -> None:
                 state['tip'] = tip = vnode.position_center
             if tnow >= state['hold_until'] or not vnode:
                 state['phase'] = 'back'
-                _snd('swip', 0.8, base)
+                _seq(base, (0, 'swip', 0.8), (0.05, 'sticky_impact', 0.4))
         else:  # Reeling back in.
             move, dist = _norm([a - b for a, b in zip(base, tip)])
             step = WHIP_SPEED * 1.3 * _TICK
@@ -845,10 +863,9 @@ def _absorb_ice_bomb(spaz: Spaz, bomb: Bomb) -> None:
     _flash(bpos, _ICE, 1.2, 2.0, 3.0, 0.4)
     _ring(spaz.node.position, _ICE, 3.0, 0.35)
     _shake(1.0)
-    _snd('shatter', 1.0, bpos)
-    _snd('freeze', 1.0, bpos)
-    _snd('hiss', 0.8, bpos)
-    _snd('orchestra_hit3', 0.8, bpos)
+    _seq(bpos, (0, 'shatter', 1.0), (0, 'freeze', 1.0), (0, 'hiss', 0.8),
+         (0, 'orchestra_hit3', 0.8), (0.1, 'bell_high', 0.5),
+         (0.2, 'ding_small_high', 0.5))
 
     duration = min(ICE_FISTS_MAX_TIME,
                    ICE_FISTS_TIME + charge * ICE_FISTS_PER_CHARGE)
@@ -905,7 +922,7 @@ def _end_ice_fists(spaz: Spaz) -> None:
     if node:
         if spaz._bst_old_highlight is not None:
             node.highlight = spaz._bst_old_highlight
-        _snd('hiss', 0.6, node.position)
+        _seq(node.position, (0, 'hiss', 0.6), (0, 'laser_reverse', 0.3))
     spaz._bst_old_highlight = None
 
 
@@ -919,8 +936,8 @@ def _ice_punch(victim_node: bs.Node) -> None:
     bs.emitfx(position=pos, velocity=(0, 3, 0), count=15, scale=0.6,
               spread=0.4, chunk_type='ice')
     _flash(pos, _ICE, 0.7, 1.0, 1.8, 0.25)
-    _snd('freeze', 1.0, pos)
-    _snd('impact_hard2', 0.7, pos)
+    _seq(pos, (0, 'freeze', 1.0), (0, 'impact_hard2', 0.7),
+         (0.03, 'ding_small_high', 0.4), (0.03, 'shatter', 0.3))
 
 
 # --------------------------- Thrown ice bomb ------------------------------
@@ -932,8 +949,8 @@ def _ice_burst(thrower: bs.Node | None, bomb: Bomb, blast: Blast) -> None:
         return
     pos = blast.node.position
     source = bomb.get_source_player(bs.Player)
-    _snd('cork_pop', 1.0, pos)
-    _snd('orchestra_hit2', 0.7, pos)
+    _seq(pos, (0, 'cork_pop', 1.0), (0.06, 'cork_pop', 0.8),
+         (0.12, 'cork_pop', 0.7), (0, 'orchestra_hit2', 0.7))
     base = random.uniform(0, 2 * math.pi)
     for i in range(ICE_MINI_BOMBS):
         ang = base + 2 * math.pi * i / max(1, ICE_MINI_BOMBS)
@@ -958,8 +975,10 @@ def _ice_burst(thrower: bs.Node | None, bomb: Bomb, blast: Blast) -> None:
             },
         )
         mini.node.connectattr('position', glow, 'position')
-        bs.timer(ICE_MINI_DELAY + ICE_MINI_STAGGER * i,
+        boom_at = ICE_MINI_DELAY + ICE_MINI_STAGGER * i
+        bs.timer(boom_at,
                  bs.WeakCallStrict(mini.handlemessage, ExplodeMessage()))
+        _seq(pos, (boom_at - 0.25, 'tick', 0.6))  # Tick-tick... boom.
 
 
 # ------------------------------- Patches ----------------------------------
