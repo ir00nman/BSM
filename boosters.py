@@ -87,6 +87,7 @@ from bascenev1lib.actor.bomb import (
 )
 from bascenev1lib.actor.playerspaz import PlayerSpaz
 from bascenev1lib.actor.spaz import PunchHitMessage, Spaz
+from bascenev1lib.gameutils import SharedObjects
 
 if TYPE_CHECKING:
     from typing import Any, Sequence
@@ -94,7 +95,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.19'
+BSM_VERSION = '2.20'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -103,7 +104,7 @@ IMPACT_FLIGHT_TIME = 4.0  # Сколько она ищет путь к враг�
 IMPACT_STEER = 0.3  # Плавность разворотов в полёте (1.0 — мгновенно).
 IMPACT_ACCEL = 5.0  # Самонаводящаяся бомба разгоняется в полёте (м/с за сек)...
 DEFLECT_SPEEDUP = 1.05  # ...и чуть-чуть при каждом отбивании...
-DEFLECT_MAX_SPEED = 44.0  # ...но не быстрее этого (м/с).
+DEFLECT_MAX_SPEED = 60.0  # ...но не быстрее этого (м/с).
 PANDA_SPEED = 30.0  # С этой скорости отбивание — «внутренний покой» (раз).
 PANDA_TIME = 0.7  # Сколько бомба кружит вокруг отбивающего (сек).
 DEFLECT_WINDOW = 0.25  # Нажал «Удар» не раньше стольких сек до попадания —
@@ -301,6 +302,29 @@ def _norm(vec: Sequence[float]) -> tuple[tuple[float, float, float], float]:
     return (vec[0] / length, vec[1] / length, vec[2] / length), length
 
 
+# Slow motion is shared by the panda deflect and the nuke close-up: it's on
+# while anyone holds it and goes back to what it was once all let go.
+_SLOWMO: dict[str, Any] = {'count': 0, 'orig': False, 'gnode': None}
+
+
+def _slowmo_on(gnode: bs.Node) -> None:
+    if _SLOWMO['count'] <= 0 or _SLOWMO['gnode'] is not gnode:
+        _SLOWMO.update(count=0, orig=bool(gnode.slow_motion), gnode=gnode)
+    _SLOWMO['count'] += 1
+    gnode.slow_motion = True
+
+
+def _slowmo_off(gnode: bs.Node) -> None:
+    if _SLOWMO['gnode'] is not gnode or _SLOWMO['count'] <= 0:
+        return
+    _SLOWMO['count'] -= 1
+    if _SLOWMO['count'] == 0:
+        try:
+            gnode.slow_motion = _SLOWMO['orig']
+        except Exception:
+            pass
+
+
 def _team(spaz: Spaz) -> Any:
     if isinstance(spaz, PlayerSpaz):
         player = spaz.getplayer(bs.Player)
@@ -366,8 +390,13 @@ def _is_own_bomb(spaz: Spaz, bomb: Bomb) -> bool:
 
 def _find_target(spaz: Spaz, origin: Sequence[float],
                  direction: Sequence[float]) -> bs.Node | None:
-    """Closest enemy within the cone of the punch, in full 3D."""
+    """Closest enemy within the cone of the punch. The cone is horizontal
+    and any height counts, so it works the same on Happy Thoughts (flying)
+    as on the ground - the ball just flies in another plane."""
     min_cos = math.cos(math.radians(IMPACT_ANGLE))
+    direction, dlen = _norm((direction[0], 0.0, direction[2]))
+    if dlen < 1e-4:
+        return None
     best: bs.Node | None = None
     best_score = 0.0
     for node in bs.getnodes():
@@ -376,11 +405,12 @@ def _find_target(spaz: Spaz, origin: Sequence[float],
         other = node.getdelegate(Spaz)
         if other is None or not other.is_alive() or not _is_enemy(spaz, other):
             continue
-        to, dist = _norm([a - b for a, b in zip(node.position_center,
-                                                origin)])
-        if dist < 0.01 or dist > IMPACT_RANGE:
+        tpos = node.position_center
+        _, dist = _norm([a - b for a, b in zip(tpos, origin)])
+        flat, flen = _norm((tpos[0] - origin[0], 0.0, tpos[2] - origin[2]))
+        if dist < 0.01 or dist > IMPACT_RANGE or flen < 0.01:
             continue
-        cos = sum(a * b for a, b in zip(to, direction))
+        cos = flat[0] * direction[0] + flat[2] * direction[2]
         if cos < min_cos:
             continue
         score = dist / cos  # Close and straight ahead wins.
@@ -445,14 +475,23 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
         _seq(target.position, (0, 'activate_beep', 0.8),
              (0.08, 'race_beep1', 0.5))
 
-    # Kept on the bomb so a punch from its target can turn it around.
+    # Kept on the bomb so a punch from its target can turn it around. A
+    # ball punched again keeps what it had: its speed, how many times it
+    # was returned and whether it already did the panda move.
+    prev = getattr(bomb, '_bst_homing', None) or {}
+    if prev.get('panda') is not None:
+        _end_panda(prev)
+    speed0 = max(IMPACT_SPEED, prev.get('speed', IMPACT_SPEED))
     state: dict[str, Any] = {
         'time': 0.0,
         'target': target,
         'sender': node,
-        'speed': IMPACT_SPEED,
+        'speed': speed0,
+        'deflects': prev.get('deflects', 0),
+        'panda_done': prev.get('panda_done', False),
+        'pingpong': prev.get('pingpong', False),
         'dir': direction,
-        'vel': tuple(c * IMPACT_SPEED for c in direction),
+        'vel': tuple(c * speed0 for c in direction),
         'last': bnode.position,
         'slow': 0,
         'avoid_until': 0.0,
@@ -785,15 +824,27 @@ def _start_panda(spaz: Spaz, bomb: Bomb, state: dict) -> None:
     node = spaz.node
     gnode = bs.getactivity().globalsnode
     state['panda_done'] = True
-    state['panda'] = {
+    panda = {
         'time': 0.0,
         'spaz': node,
         'ang': math.atan2(bomb.node.position[2] - node.position[2],
                           bomb.node.position[0] - node.position[0]),
-        'slow_before': gnode.slow_motion,
         'gnode': gnode,
+        'slow': True,
+        'bomb': weakref.ref(bomb),
     }
-    gnode.slow_motion = True
+    state['panda'] = panda
+    _slowmo_on(gnode)
+    # Never knocks the deflector over while it circles them.
+    try:
+        ghost = _PandaFactory.get().no_fighters
+        bomb.node.materials = bomb.node.materials + (ghost,)
+        panda['ghost'] = ghost
+    except Exception:
+        pass
+    # However the bomb ends (even blown up mid-move), time goes back to
+    # normal right after the animation.
+    bs.timer(PANDA_TIME + 0.15, bs.CallStrict(_end_panda_slowmo, panda))
     col = _bright(_color(spaz), 1.0)
     # A calm ring of light opening around them.
     ring = bs.newnode('locator', attrs={
@@ -807,6 +858,55 @@ def _start_panda(spaz: Spaz, bomb: Bomb, state: dict) -> None:
          (0.5, 'swip2', 0.6))
 
 
+class _PandaFactory:
+    """Per-activity material: the circling ball passes through fighters."""
+
+    _STORENAME = 'bsm_panda_factory'
+
+    def __init__(self) -> None:
+        shared = SharedObjects.get()
+        self.no_fighters = bs.Material()
+        self.no_fighters.add_actions(
+            conditions=('they_have_material', shared.player_material),
+            actions=(
+                ('modify_part_collision', 'collide', False),
+                ('modify_part_collision', 'physical', False),
+            ),
+        )
+
+    @classmethod
+    def get(cls) -> _PandaFactory:
+        activity = bs.getactivity()
+        factory = activity.customdata.get(cls._STORENAME)
+        if factory is None:
+            factory = cls()
+            activity.customdata[cls._STORENAME] = factory
+        return factory
+
+
+def _end_panda_slowmo(panda: dict) -> None:
+    if panda.get('slow'):
+        panda['slow'] = False
+        _slowmo_off(panda['gnode'])
+
+
+def _end_panda(state: dict) -> None:
+    """Finish a panda move: time back to normal, the ball solid again."""
+    panda = state.get('panda')
+    state['panda'] = None
+    if panda is None:
+        return
+    _end_panda_slowmo(panda)
+    bomb = panda['bomb']()
+    ghost = panda.get('ghost')
+    if bomb is not None and bomb.node and ghost is not None:
+        try:
+            bomb.node.materials = tuple(m for m in bomb.node.materials
+                                        if m is not ghost)
+        except Exception:
+            pass
+
+
 def _panda_step(bomb: Bomb, state: dict) -> None:
     panda = state['panda']
     bnode = bomb.node
@@ -814,12 +914,8 @@ def _panda_step(bomb: Bomb, state: dict) -> None:
     panda['time'] += _TICK
     tnow = panda['time']
     if not node or tnow >= PANDA_TIME:
-        # Release: back at the sender, harder than ever.
-        state['panda'] = None
-        try:
-            panda['gnode'].slow_motion = panda['slow_before']
-        except Exception:
-            pass
+        # Release: back at the sender, a bit harder (it keeps its speed).
+        _end_panda(state)
         target = state['target']
         bpos = bnode.position
         if target:
@@ -827,9 +923,10 @@ def _panda_step(bomb: Bomb, state: dict) -> None:
                                 zip(target.position_center, bpos)])
         else:
             heading = state['dir']
-        state['speed'] = DEFLECT_MAX_SPEED
+        speed = min(DEFLECT_MAX_SPEED, state['speed'] * 1.1)
+        state['speed'] = speed
         state['dir'] = heading
-        state['vel'] = tuple(c * DEFLECT_MAX_SPEED for c in heading)
+        state['vel'] = tuple(c * speed for c in heading)
         state['time'] = 0.0
         bnode.velocity = state['vel']
         bs.emitfx(position=bpos, velocity=tuple(c * 10.0 for c in heading),
@@ -844,14 +941,15 @@ def _panda_step(bomb: Bomb, state: dict) -> None:
     rate = 2.0 * math.pi / PANDA_TIME
     panda['ang'] += rate * _TICK
     ang = panda['ang']
-    goal = (center[0] + math.cos(ang) * 1.4,
+    radius = 1.8
+    goal = (center[0] + math.cos(ang) * radius,
             center[1] + 0.3 + 0.4 * math.sin(ang * 2.0),
-            center[2] + math.sin(ang) * 1.4)
+            center[2] + math.sin(ang) * radius)
     # Ride the circle smoothly: its own tangent speed plus a soft pull
     # back onto it.
-    tangent = (-math.sin(ang) * 1.4 * rate,
+    tangent = (-math.sin(ang) * radius * rate,
                0.8 * math.cos(ang * 2.0) * rate,
-               math.cos(ang) * 1.4 * rate)
+               math.cos(ang) * radius * rate)
     bpos = bnode.position
     bnode.velocity = tuple(t + (g - p) * 4.0
                            for t, g, p in zip(tangent, goal, bpos))
@@ -1450,12 +1548,38 @@ def _fire_whip(spaz: Spaz) -> None:
             bs.emitfx(position=pos, velocity=(0.0, 0.6, 0.0), count=1,
                       scale=0.55, spread=0.04, chunk_type='slime')
 
+    def _dodged(victim_node: bs.Node) -> str | None:
+        """Jumping over it or parrying it beats the tentacle."""
+        victim = victim_node.getdelegate(Spaz)
+        if victim is None:
+            return None
+        if getattr(victim, '_ab_active', False):
+            return 'parry'
+        since_jump = bs.time() * 1000.0 - getattr(victim, 'last_jump_time_ms',
+                                                  -9999)
+        if since_jump < 700 or victim_node.velocity[1] > 2.0:
+            return 'jump'
+        return None
+
     def _latch(victim_node: bs.Node) -> None:
+        dodge = _dodged(victim_node)
+        if dodge is not None:
+            # Grabs air (or bounces off the shield) and sinks back.
+            vpos = victim_node.position_center
+            if dodge == 'parry':
+                _snd('block', 1.0, vpos)
+                _snd('shield_hit', 0.8, vpos)
+            else:
+                _snd('swip', 0.8, vpos)
+            bs.emitfx(position=vpos, velocity=(0, 2, 0), count=8, scale=0.5,
+                      spread=0.3, chunk_type='slime')
+            state['phase'] = 'flail'
+            state['flail_until'] = state['time'] + 0.4
+            return
         state['phase'] = 'hold'
         state['victim'] = victim_node
         state['hold_until'] = state['time'] + WHIP_FUSE + 0.45
         vpos = victim_node.position_center
-        victim_node.handlemessage('knockout', (WHIP_FUSE + 0.3) * 1000.0)
         bs.emitfx(position=vpos, velocity=(0, 3, 0), count=20, scale=0.7,
                   spread=0.4, chunk_type='slime')
         _snd('splatter', 1.0, vpos)
@@ -1838,7 +1962,8 @@ _NUKE_TIMERS: list[list] = []
 def _nuke_close_up(gnode: bs.Node, node: bs.Node, saved: dict) -> None:
     """The very last moment: slow motion and the camera closing in."""
     try:
-        gnode.slow_motion = True
+        _slowmo_on(gnode)
+        saved['slow_held'] = True
     except Exception:
         pass
     try:
@@ -1858,8 +1983,9 @@ def _nuke_close_up(gnode: bs.Node, node: bs.Node, saved: dict) -> None:
 
 
 def _restore_world(gnode: bs.Node, saved: dict) -> None:
+    if saved.pop('slow_held', False):
+        _slowmo_off(gnode)
     try:
-        gnode.slow_motion = saved['slow']
         gnode.area_of_interest_bounds = saved['aoi']
         for other, val in saved['focus'].items():
             if other:
