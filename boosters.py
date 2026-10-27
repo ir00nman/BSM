@@ -25,6 +25,10 @@
     волне щита (в 1.7 раза шире обычного взрыва) разбрасывает 3 ледяные
     мини-бомбы, которые взрываются почти сразу после основной.
 
+Липкая бомба, заряжен:
+  брошенная заряженная липкая бомба ищет врага в радиусе 5 м от себя,
+  доворачивает к нему и прилипает (по дороге к полу не липнет).
+
 Работает и на «Счастливых мыслях»: направления и расстояния считаются в 3D.
 Мод нужен только хосту: в сетевой игре всё считается на сервере.
 """
@@ -59,6 +63,9 @@ ICE_FISTS_PER_CHARGE = 0.01  # ...плюс секунд за каждую еди
 ICE_FISTS_MAX_TIME = 20.0  # ...но не дольше этого.
 ICE_FISTS_FREEZE = 3.0  # На сколько секунд замораживает удар ледяным кулаком.
 ICE_MINI_BOMBS = 3  # Сколько мини-бомб разбрасывает заряженная ледяная.
+MAGNET_RANGE = 5.0  # С какого расстояния заряженная липкая бомба тянется
+#                     к врагу (метров).
+MAGNET_SPEED = 14.0  # С какой скоростью она к нему летит (м/с).
 FX_STRENGTH = 0.5  # Сила вспышек, света и тряски камеры (1.0 = максимум).
 FLASH_STRENGTH = 0.4  # Яркость и размер вспышек (1.0 = как в версии 1.5).
 
@@ -73,6 +80,7 @@ _orig_init: Any = None
 _orig_handlemessage: Any = None
 _orig_drop_bomb: Any = None
 _orig_bomb_handle_impact: Any = None
+_orig_bomb_handlemessage: Any = None
 
 
 # ------------------------------- Helpers ----------------------------------
@@ -394,6 +402,82 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
     _step()
 
 
+# -------------------------- Sticky bomb + charge --------------------------
+
+
+def _set_sticky(bnode: bs.Node, value: bool) -> None:
+    try:
+        bnode.sticky = value
+    except Exception:
+        pass  # Not a sticky-capable node; homing still works.
+
+
+def _start_magnet(bomb: Bomb) -> None:
+    """Thrown charged sticky bomb: home in on an enemy within range."""
+    bnode = bomb.node
+    if not bnode or getattr(bomb, '_exploded', False):
+        return
+    state: dict[str, Any] = {'time': 0.0, 'target': None}
+
+    def _stop() -> None:
+        bomb._bst_magnet_timer = None  # type: ignore[attr-defined]
+        if bnode:
+            _set_sticky(bnode, True)
+
+    def _step() -> None:
+        state['time'] += _TICK
+        spaz = bomb._bst_magnet()
+        if (
+            spaz is None
+            or not bnode
+            or getattr(bomb, '_exploded', False)
+        ):
+            _stop()
+            return
+        bpos = bnode.position
+        target = state['target']
+        victim = target.getdelegate(Spaz) if target else None
+        if victim is None or not victim.is_alive():
+            state['target'] = target = None
+            # Look for the nearest enemy around the bomb.
+            best = None
+            for node in bs.getnodes():
+                if not node or node.getnodetype() != 'spaz':
+                    continue
+                other = node.getdelegate(Spaz)
+                if (
+                    other is None
+                    or not other.is_alive()
+                    or not _is_enemy(spaz, other)
+                ):
+                    continue
+                _, dist = _norm([a - b for a, b in zip(node.position_center,
+                                                       bpos)])
+                if dist <= MAGNET_RANGE and (best is None or dist < best[0]):
+                    best = (dist, node)
+            if best is None:
+                _set_sticky(bnode, True)
+                return
+            state['target'] = target = best[1]
+            _set_sticky(bnode, False)  # Don't glue to the floor on the way.
+            _snd('activate_beep', 0.8, bpos)
+            _snd('sticky_impact', 0.6, bpos)
+        fdir, dist = _norm([a - b for a, b in zip(target.position_center,
+                                                  bpos)])
+        if dist < 0.8:
+            _set_sticky(bnode, True)  # Close enough: let it splat on.
+            bnode.velocity = tuple(c * MAGNET_SPEED * 0.5 for c in fdir)
+            return
+        bnode.velocity = tuple(c * MAGNET_SPEED for c in fdir)
+        if random.random() < 0.4:
+            bs.emitfx(position=bpos, velocity=(0, 1, 0), count=2, scale=0.5,
+                      spread=0.1, chunk_type='slime')
+
+    bomb._bst_magnet_timer = bs.Timer(  # type: ignore[attr-defined]
+        _TICK, _step, repeat=True
+    )
+
+
 # --------------------------- Ice bomb + charge ----------------------------
 
 
@@ -574,12 +658,25 @@ def _patched_drop_bomb(self: Spaz) -> Bomb | None:
     # Checked before the call: Absorb Shield may spend the charge inside it.
     charged = _charged(self)
     bomb = _orig_drop_bomb(self)
+    if bomb is not None and bomb.bomb_type == 'sticky' and charged:
+        # Homes in on enemies once thrown (see _start_magnet).
+        bomb._bst_magnet = weakref.ref(self)  # type: ignore[attr-defined]
     if bomb is not None and bomb.bomb_type == 'ice' and charged:
         thrower = self.node
         bomb.add_explode_callback(
             lambda bmb, blast: _ice_burst(thrower, bmb, blast)
         )
     return bomb
+
+
+def _patched_bomb_handlemessage(self: Bomb, msg: Any) -> Any:
+    result = _orig_bomb_handlemessage(self, msg)
+    if getattr(self, '_bst_magnet', None) is not None:
+        if isinstance(msg, bs.DroppedMessage):
+            _start_magnet(self)
+        elif isinstance(msg, bs.PickedUpMessage):
+            self._bst_magnet_timer = None  # type: ignore[attr-defined]
+    return result
 
 
 def _patched_bomb_handle_impact(self: Bomb) -> None:
@@ -608,13 +705,15 @@ class BoostersPlugin(babase.Plugin):
         Spaz._bst_patched = True  # type: ignore[attr-defined]
 
         global _orig_init, _orig_handlemessage, _orig_drop_bomb
-        global _orig_bomb_handle_impact
+        global _orig_bomb_handle_impact, _orig_bomb_handlemessage
         _orig_init = Spaz.__init__
         _orig_handlemessage = Spaz.handlemessage
         _orig_drop_bomb = Spaz.drop_bomb
         _orig_bomb_handle_impact = Bomb._handle_impact
+        _orig_bomb_handlemessage = Bomb.handlemessage
 
         Spaz.__init__ = _patched_init
         Spaz.handlemessage = _patched_handlemessage
         Spaz.drop_bomb = _patched_drop_bomb
         Bomb._handle_impact = _patched_bomb_handle_impact
+        Bomb.handlemessage = _patched_bomb_handlemessage
