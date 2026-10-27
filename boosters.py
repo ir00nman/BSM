@@ -38,7 +38,7 @@
 
 Ядерный суицид (нужен Absorb Shield):
   подобрал проклятие («суицид») и спарировал щитом его взрыв — открывается
-  QTE на 3 секунды: по одной показываются 4 кнопки, жми их по порядку.
+  QTE на 3 секунды: по одной показываются 6 цветных кнопок, жми их по порядку.
   Успел без ошибок — тревога и таймер до взрыва, в самый последний момент
   замедление и наезд камеры, и боец взрывается ядерной бомбой, унося с
   собой всех на карте. Ошибся или не успел — обычный взрыв проклятия.
@@ -57,12 +57,13 @@
     хватает ВСЕХ врагов в радиусе 3.5 м (и тех, кто зайдёт позже) — на
     каждого своё щупальце; бомба и враги притягиваются друг к другу
     (лёгкая бомба летит быстрее), пока не слипнутся, а потом обвивает;
-  * удар кулаком по своей липкой бомбе — она превращается в щупальце
-    (1 шт., до 3). Кнопка «Бомба» выстреливает его из руки вперёд (до 8 м):
-    оно доворачивает к ближайшему врагу перед бойцом (до 40°), а если такого
-    нет — летит прямо и хватает первого, кого заденет. Пойманного валит с
-    ног, на него налепляются 4 липкие мини-бомбы и через 0.8 с взрываются
-    прямо на нём; заряд делает их взрывы шире. Потом щупальце втягивается.
+  * удар кулаком по своей липкой бомбе — она превращается в 3 щупальца
+    (до 9). Каждое нажатие «Бомба» — одно щупальце: оно вырывается из земли
+    прямо под врагом, на которого ты смотришь (узкий конус ±15°, на всю
+    карту), обвивает его и валит с ног; на него налепляются 4 липкие
+    мини-бомбы и через 0.8 с взрываются прямо на нём (заряд делает взрывы
+    шире), потом щупальце уходит обратно в землю. Нет никого в конусе —
+    вырывается в 6 м впереди и хватает того, кто там окажется.
 
 Работает и на «Счастливых мыслях»: направления и расстояния считаются в 3D.
 Мод нужен только хосту: в сетевой игре всё считается на сервере.
@@ -93,17 +94,20 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.12'
+BSM_VERSION = '2.13'
 
 # ------------------------------- Настройки --------------------------------
 
 IMPACT_SPEED = 22.0  # Скорость ударной бомбы после удара (м/с).
 IMPACT_FLIGHT_TIME = 4.0  # Сколько она ищет путь к врагу, потом взрывается.
 IMPACT_STEER = 0.3  # Плавность разворотов в полёте (1.0 — мгновенно).
-DEFLECT_SPEEDUP = 1.15  # Во сколько раз быстрее после каждого отбивания...
+IMPACT_ACCEL = 5.0  # Самонаводящаяся бомба разгоняется в полёте (м/с за сек)...
+DEFLECT_SPEEDUP = 1.05  # ...и чуть-чуть при каждом отбивании...
 DEFLECT_MAX_SPEED = 44.0  # ...но не быстрее этого (м/с).
-SHOT_COUNT = 4  # Сколько мини-снарядов даёт отбитая заряженная бомба.
-SHOT_MAX = 8  # Сколько снарядов можно носить.
+PANDA_SPEED = 30.0  # С этой скорости отбивание — «внутренний покой» (раз).
+PANDA_TIME = 0.7  # Сколько бомба кружит вокруг отбивающего (сек).
+SHOT_COUNT = 6  # Сколько мини-снарядов даёт отбитая заряженная бомба.
+SHOT_MAX = 12  # Сколько снарядов можно носить.
 SHOT_SPEED = 20.0  # Скорость снаряда (м/с).
 SHOT_LIFETIME = 3.0  # Через сколько секунд снаряд взрывается сам.
 SHOT_DAMAGE = 500.0  # Урон снаряда (1000 = полное здоровье).
@@ -114,8 +118,10 @@ MINE_SPREAD_MAX = 3.2  # ...и не дальше этого.
 MINE_SAFE_SPACING = 1.9  # Так далеко друг от друга, чтобы взрыв одной мины
 #                          (радиус 1.4 м) не задел соседку.
 MINE_KICK_SCALE = 3.0  # Пнутая мина: во столько раз больше площадь и мин.
+MINE_WAVES = 4  # Мины вылетают волнами, от ближних к дальним...
+MINE_WAVE_DELAY = 0.25  # ...с такой паузой (сек).
 NUKE_QTE_TIME = 3.0  # Время на QTE ядерного суицида (сек).
-NUKE_QTE_KEYS = 4  # Сколько кнопок нужно нажать.
+NUKE_QTE_KEYS = 6  # Сколько кнопок нужно нажать.
 NUKE_COUNTDOWN = 3.0  # Отсчёт до ядерного взрыва после QTE (сек).
 NUKE_SLOWMO = 0.35  # Замедление и наезд камеры: столько секунд до взрыва.
 IMPACT_RANGE = 25.0  # Дальность поиска врага для неё (метров).
@@ -129,11 +135,12 @@ ICE_MINI_DELAY = 0.7  # Через сколько после основной в
 ICE_MINI_STAGGER = 0.2  # ...и с каким шагом остальные (сек).
 TENTACLE_RANGE = 3.5  # Дальность щупальцев заряженной липкой бомбы (метров).
 TENTACLE_PULL = 160.0  # Сила, с которой щупальце подтягивает врага.
-WHIP_RANGE = 8.0  # Дальность щупальца-предмета (метров).
-WHIP_ANGLE = 40.0  # Насколько враг может быть в стороне от взгляда (градусов).
-WHIP_SPEED = 30.0  # Скорость вылета щупальца (м/с).
+WHIP_RANGE = 60.0  # Дальность щупальца: на всю карту (метров).
+WHIP_ANGLE = 15.0  # Конус поиска цели от взгляда (градусов в каждую сторону).
+WHIP_PER_BOMB = 3  # Сколько щупалец даёт одна липучка.
+WHIP_HEIGHT = 3.2  # Как высоко щупальце вырастает из земли (метров).
 WHIP_FUSE = 0.8  # Через сколько взрываются налепленные мини-бомбы (сек).
-WHIP_MAX = 3  # Сколько щупалец можно носить.
+WHIP_MAX = 9  # Сколько щупалец можно носить.
 FX_STRENGTH = 0.5  # Сила вспышек, света и тряски камеры (1.0 = максимум).
 FLASH_STRENGTH = 0.4  # Яркость и размер вспышек (1.0 = как в версии 1.5).
 
@@ -455,8 +462,13 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
             return
         tnow = state['time']
         bpos = bnode.position
+        if state.get('panda') is not None:
+            _panda_step(bomb, state)
+            return
         target = state['target']
-        speed = state['speed']
+        # Speeds up the whole flight.
+        state['speed'] = speed = min(DEFLECT_MAX_SPEED,
+                                     state['speed'] + IMPACT_ACCEL * _TICK)
 
         if target is None:
             if tnow > 2.0:
@@ -474,8 +486,9 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
             tpos = target.position_center
             want, dist = _norm([a - b for a, b in zip(tpos, bpos)])
             # It goes off when it physically touches them (see
-            # _patched_bomb_handle_impact); this is only a backstop.
-            if dist < 0.55:
+            # _patched_bomb_handle_impact); this is only a backstop - which
+            # must not let a fast bomb skip past them between ticks.
+            if dist < max(0.55, speed * _TICK):
                 _stop()
                 _snd('big_impact', 1.0, bpos)
                 bomb.handlemessage(ExplodeMessage())
@@ -484,6 +497,31 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
             # (domes like Doom Shroom).
             want, _ = _norm((tpos[0] - bpos[0], tpos[1] + 0.25 - bpos[1],
                              tpos[2] - bpos[2]))
+            if state.get('pingpong'):
+                # Knocked back: dead straight at them, no smoothing (that's
+                # what made it weave at speed). Only if it's truly stuck
+                # against something does it hop over/around for a moment.
+                _, moved = _norm([a - b for a, b in zip(bpos, state['last'])])
+                if tnow > 0.1 and moved < speed * _TICK * 0.35:
+                    state['slow'] += 1
+                else:
+                    state['slow'] = 0
+                if state['slow'] >= 4 and tnow >= state['avoid_until']:
+                    dirs = _avoid_dirs(want)
+                    state['avoid_dir'] = dirs[state['attempt'] % len(dirs)]
+                    state['attempt'] += 1
+                    state['avoid_until'] = tnow + 0.12
+                    state['slow'] = 0
+                fdir = (state['avoid_dir'] if tnow < state['avoid_until']
+                        else want)
+                state['dir'] = fdir
+                state['last'] = bpos
+                state['vel'] = tuple(c * speed for c in fdir)
+                bnode.velocity = state['vel']
+                bs.emitfx(position=bpos,
+                          velocity=tuple(-c * 2.0 for c in fdir), count=3,
+                          scale=0.6, spread=0.08, chunk_type='spark')
+                return
 
             # Truly stuck (barely moving for a while)? Try going over,
             # under or around it, a different way each time.
@@ -549,12 +587,18 @@ def _deflect_homing(spaz: Spaz, bomb: Bomb) -> None:
         'slow': 0,
         'avoid_until': 0.0,
         'attempt': 0,
+        'pingpong': True,
     })
     # The deflector is now the one it won't go off on, and gets the credit.
     bomb.owner = node
     if spaz.source_player is not None:
         bomb._source_player = spaz.source_player  # type: ignore[attr-defined]
     bomb.node.velocity = state['vel']
+
+    if (speed >= PANDA_SPEED and back_to is not None
+            and not state.get('panda_done')):
+        _start_panda(spaz, bomb, state)
+        return
 
     ppos = node.punch_position
     _flash(ppos, _bright(_color(spaz), 2.0), 0.6, 1.0, 1.5, 0.15)
@@ -565,6 +609,82 @@ def _deflect_homing(spaz: Spaz, bomb: Bomb) -> None:
          (0.02, 'swip2', 0.9))
     if back_to is not None:
         _snd('activate_beep', 0.8, back_to.position)
+
+
+def _start_panda(spaz: Spaz, bomb: Bomb, state: dict) -> None:
+    """"Inner peace": time slows, the bomb flows around the deflector in a
+    wide circle and is sent back (Kung Fu Panda 2's cannonball catch)."""
+    node = spaz.node
+    gnode = bs.getactivity().globalsnode
+    state['panda_done'] = True
+    state['panda'] = {
+        'time': 0.0,
+        'spaz': node,
+        'ang': math.atan2(bomb.node.position[2] - node.position[2],
+                          bomb.node.position[0] - node.position[0]),
+        'slow_before': gnode.slow_motion,
+        'gnode': gnode,
+    }
+    gnode.slow_motion = True
+    col = _bright(_color(spaz), 1.0)
+    # A calm ring of light opening around them.
+    ring = bs.newnode('locator', attrs={
+        'shape': 'circleOutline', 'position': node.position, 'color': col,
+        'opacity': 0.0, 'draw_beauty': False, 'additive': True})
+    bs.animate_array(ring, 'size', 1, {0: [0.5], PANDA_TIME: [3.2]})
+    bs.animate(ring, 'opacity', {0: 0.0, 0.1: 0.6, PANDA_TIME: 0.0})
+    bs.timer(PANDA_TIME + 0.05, ring.delete)
+    _seq(node.position, (0, 'hiss', 0.6), (0, 'swish', 0.8),
+         (0.1, 'ding_small_high', 0.5), (0.3, 'swip', 0.6),
+         (0.5, 'swip2', 0.6))
+
+
+def _panda_step(bomb: Bomb, state: dict) -> None:
+    panda = state['panda']
+    bnode = bomb.node
+    node = panda['spaz']
+    panda['time'] += _TICK
+    tnow = panda['time']
+    if not node or tnow >= PANDA_TIME:
+        # Release: back at the sender, harder than ever.
+        state['panda'] = None
+        try:
+            panda['gnode'].slow_motion = panda['slow_before']
+        except Exception:
+            pass
+        target = state['target']
+        bpos = bnode.position
+        if target:
+            heading, _ = _norm([a - b for a, b in
+                                zip(target.position_center, bpos)])
+        else:
+            heading = state['dir']
+        state['speed'] = DEFLECT_MAX_SPEED
+        state['dir'] = heading
+        state['vel'] = tuple(c * DEFLECT_MAX_SPEED for c in heading)
+        state['time'] = 0.0
+        bnode.velocity = state['vel']
+        bs.emitfx(position=bpos, velocity=tuple(c * 10.0 for c in heading),
+                  count=40, scale=0.9, spread=0.2, chunk_type='spark')
+        bs.emitfx(position=bpos, emit_type='distortion', spread=1.2)
+        _shake(1.5)
+        _seq(bpos, (0, 'gong', 1.0), (0, 'super_punch', 1.0),
+             (0.02, 'orchestra_hit_big2', 0.8), (0.03, 'swip2', 1.0))
+        return
+    # One flowing circle around them, rising and falling like a wave.
+    center = node.position_center
+    panda['ang'] += 2.0 * math.pi * _TICK / PANDA_TIME
+    ang = panda['ang']
+    goal = (center[0] + math.cos(ang) * 1.4,
+            center[1] + 0.3 + 0.4 * math.sin(ang * 2.0),
+            center[2] + math.sin(ang) * 1.4)
+    bpos = bnode.position
+    bnode.velocity = tuple((g - p) * 12.0 for g, p in zip(goal, bpos))
+    # A flowing ribbon behind it.
+    bs.emitfx(position=bpos, velocity=(0, 0.3, 0), count=2, scale=0.7,
+              spread=0.05, chunk_type='sweat')
+    bs.emitfx(position=bpos, velocity=(0, 0.2, 0), count=1, scale=0.5,
+              spread=0.05, chunk_type='spark')
 
 
 def _shell_pop(shell: Bomb) -> None:
@@ -655,6 +775,19 @@ def _fire_shot(spaz: Spaz) -> None:
     shot._bst_shell = True  # type: ignore[attr-defined]
 
     snode = shot.node
+    col = _bright(_color(spaz), 1.0)
+    # Glowing core in the shooter's color.
+    glow = bs.newnode('light', owner=snode, attrs={
+        'color': col, 'radius': 0.12, 'intensity': 0.8,
+        'height_attenuated': False, 'volume_intensity_scale': 0.3})
+    snode.connectattr('position', glow, 'position')
+    # A double helix of sparks spun around the flight line.
+    side, slen = _norm((-facing[2], 0.0, facing[0]))
+    if slen < 1e-4:
+        side = (1.0, 0.0, 0.0)
+    up = (side[1] * facing[2] - side[2] * facing[1],
+          side[2] * facing[0] - side[0] * facing[2],
+          side[0] * facing[1] - side[1] * facing[0])
     state = {'time': 0.0}
 
     def _step() -> None:
@@ -667,13 +800,31 @@ def _fire_shot(spaz: Spaz) -> None:
             shot.handlemessage(ExplodeMessage())
             return
         snode.velocity = vel  # Dead straight, no drop.
-        bs.emitfx(position=snode.position,
-                  velocity=tuple(-c * 0.1 for c in vel), count=2, scale=0.4,
-                  spread=0.05, chunk_type='spark')
+        pos = snode.position
+        spin = state['time'] * 30.0
+        for phase, chunk in ((0.0, 'spark'), (math.pi, 'sweat')):
+            ca, sa = math.cos(spin + phase), math.sin(spin + phase)
+            off = tuple((side[k] * ca + up[k] * sa) * 0.18 for k in range(3))
+            bs.emitfx(position=tuple(pos[k] + off[k] for k in range(3)),
+                      velocity=tuple(off[k] * 4.0 for k in range(3)),
+                      count=1, scale=0.45, spread=0.0, chunk_type=chunk)
+        if int(state['time'] / _TICK) % 4 == 0:
+            bs.emitfx(position=pos, count=1, emit_type='tendrils',
+                      tendril_type='thin_smoke')
 
     shot._bst_flight = bs.Timer(  # type: ignore[attr-defined]
         _TICK, _step, repeat=True
     )
+    # Muzzle: a little ring of sparks around the barrel.
+    for i in range(10):
+        ang = 2.0 * math.pi * i / 10
+        out = tuple(side[k] * math.cos(ang) + up[k] * math.sin(ang)
+                    for k in range(3))
+        bs.emitfx(position=start,
+                  velocity=tuple(out[k] * 5.0 + facing[k] * 2.0
+                                 for k in range(3)),
+                  count=1, scale=0.5, spread=0.0, chunk_type='spark')
+    _flash(start, col, 0.4, 0.6, 1.0, 0.1)
     _snd('laser', 0.6, start)
     _snd('swip2', 0.8, start)
     _snd('cork_pop', 0.6, start)
@@ -730,10 +881,22 @@ def _spread_mines(mine: Bomb, big: bool = False) -> None:
     source = mine.get_source_player(bs.Player)
     owner = mine.owner
     flight = 0.55
-    tossed = []
-    spots = _mine_spots(big)
+    spots = sorted(_mine_spots(big), key=lambda spot: spot[1])
     far = max(dist for _, dist in spots) if spots else MINE_SPREAD_MAX
-    for ang, dist in spots:
+    # Out in waves, nearest ring first.
+    per_wave = max(1, math.ceil(len(spots) / MINE_WAVES))
+    waves = [spots[i:i + per_wave] for i in range(0, len(spots), per_wave)]
+    for num, wave in enumerate(waves):
+        bs.timer(num * MINE_WAVE_DELAY,
+                 bs.CallStrict(_toss_mine_wave, mine, pos, wave, far, flight,
+                               source, owner, big))
+
+
+def _toss_mine_wave(mine: Bomb, pos: Sequence[float], wave: list,
+                    far: float, flight: float, source: Any, owner: Any,
+                    big: bool) -> None:
+    tossed = []
+    for ang, dist in wave:
         speed = dist / flight
         extra = Bomb(
             position=(pos[0], pos[1] + 0.5, pos[2]),
@@ -743,12 +906,10 @@ def _spread_mines(mine: Bomb, big: bool = False) -> None:
             owner=owner,
         ).autoretain()
         tossed.append(extra)
-    bs.emitfx(position=pos, velocity=(0, 3, 0), count=12 if not big else 30,
+    bs.emitfx(position=pos, velocity=(0, 3, 0), count=8 if not big else 15,
               scale=0.6, spread=0.4, chunk_type='metal')
     _snd('cork_pop', 1.0, pos)
-    _snd('bomb_drop01', 0.8, pos)
-    if big:
-        _snd('bomb_drop02', 0.8, pos)
+    _snd('bomb_drop01' if not big else 'bomb_drop02', 0.7, pos)
 
     def _settle() -> None:
         for extra in tossed:
@@ -984,7 +1145,7 @@ def _start_tentacle(bomb: Bomb) -> None:
 
 # ---------------------------- Tentacle whip -------------------------------
 
-_WHIP_SEGMENTS = 10
+_WHIP_SEGMENTS = 12
 
 
 def _update_counter(spaz: Spaz) -> None:
@@ -1008,7 +1169,7 @@ def _wrap_into_whip(spaz: Spaz, bomb: Bomb) -> None:
     charge = _bomb_charge(bomb) or Spaz.bsm_take_charge(spaz)
     bpos = bomb.node.position
     bomb.handlemessage(bs.DieMessage())  # Consumed, never goes off.
-    spaz._bst_whips = min(WHIP_MAX, spaz._bst_whips + 1)
+    spaz._bst_whips = min(WHIP_MAX, spaz._bst_whips + WHIP_PER_BOMB)
     spaz._bst_whip_charge += charge
     _update_counter(spaz)
 
@@ -1048,8 +1209,34 @@ def _whip_target(spaz: Spaz, facing: Sequence[float]) -> bs.Node | None:
     return best
 
 
+def _ground_under(pos: Sequence[float]) -> tuple:
+    """Rough floor point under a fighter (no ray casts in the game API)."""
+    return (pos[0], pos[1] - 0.9, pos[2])
+
+
+def _whip_curve(base: Sequence[float], tip: Sequence[float], phase: float,
+                amp: float, segments: int) -> list[tuple]:
+    """A tentacle standing up out of the ground: bulges upward, wriggles."""
+    top = max(base[1], tip[1]) + 0.8
+    ctrl = (base[0], top, base[2])
+    side, slen = _norm((tip[2] - base[2], 0.0, base[0] - tip[0]))
+    if slen < 1e-4:
+        side = (1.0, 0.0, 0.0)
+    pts = []
+    for i in range(segments):
+        t = (i + 1) / segments
+        # Quadratic bezier: base -> (above base) -> tip.
+        p = [(1 - t) ** 2 * base[k] + 2 * (1 - t) * t * ctrl[k]
+             + t * t * tip[k] for k in range(3)]
+        wave = math.sin(phase + t * 6.0) * amp * math.sin(t * math.pi)
+        pts.append((p[0] + side[0] * wave, p[1], p[2] + side[2] * wave))
+    return pts
+
+
 def _fire_whip(spaz: Spaz) -> None:
-    """The bomb button lashes the tentacle out of the fighter's hand."""
+    """The bomb button: a tentacle bursts out of the ground under the enemy
+    you're looking at (anywhere on the map, within a narrow cone), wraps
+    them up and slaps four mini sticky bombs on them."""
     node = spaz.node
     spaz._bst_whips -= 1
     charge, spaz._bst_whip_charge = spaz._bst_whip_charge, 0.0
@@ -1057,21 +1244,28 @@ def _fire_whip(spaz: Spaz) -> None:
     spaz._bst_whip_active = True
 
     facing = _look_dir(spaz)
-
-    def _base() -> tuple:
-        pos = node.position_center
-        return (pos[0] + facing[0] * 0.35, pos[1] + 0.15,
-                pos[2] + facing[2] * 0.35)
-
     target = _whip_target(spaz, facing)
-    start = _base()
-    straight_end = tuple(start[k] + facing[k] * WHIP_RANGE for k in range(3))
-    beads = _tentacle_beads(start, _WHIP_SEGMENTS, 0.16, 0.06, node)
+    if target is not None:
+        base = _ground_under(target.position)
+    else:
+        # Nobody in the cone: it erupts a little way ahead, grabbing
+        # whoever happens to be there.
+        here = node.position
+        base = _ground_under((here[0] + facing[0] * 6.0, here[1],
+                              here[2] + facing[2] * 6.0))
+    beads = _tentacle_beads(base, _WHIP_SEGMENTS, 0.26, 0.08, None)
     source = spaz.source_player
-    state: dict[str, Any] = {'time': 0.0, 'phase': 'out', 'tip': start,
-                             'victim': None}
-    _snd('swip2', 1.0, start)
-    _snd('sticky_impact', 0.7, start)
+    state: dict[str, Any] = {'time': 0.0, 'phase': 'rise', 'victim': None,
+                             'minis': []}
+
+    # Ground bursting open.
+    bs.emitfx(position=base, velocity=(0, 6, 0), count=15, scale=0.8,
+              spread=0.5, chunk_type='rock')
+    bs.emitfx(position=base, count=2, emit_type='tendrils',
+              tendril_type='smoke')
+    _snd('impact_hard', 0.9, base)
+    _snd('splatter', 0.8, base)
+    _snd('swip2', 0.8, node.position)
 
     def _finish() -> None:
         spaz._bst_whip_active = False
@@ -1083,87 +1277,96 @@ def _fire_whip(spaz: Spaz) -> None:
         state['victim'] = victim_node
         state['hold_until'] = state['time'] + WHIP_FUSE + 0.45
         vpos = victim_node.position_center
-        victim_node.handlemessage('knockout', (WHIP_FUSE + 0.2) * 1000.0)
+        victim_node.handlemessage('knockout', (WHIP_FUSE + 0.3) * 1000.0)
         bs.emitfx(position=vpos, velocity=(0, 3, 0), count=20, scale=0.7,
                   spread=0.4, chunk_type='slime')
         _snd('splatter', 1.0, vpos)
         _snd('sticky_impact', 1.0, vpos)
         _snd('cork_pop', 1.0, vpos)
-        # Four mini sticky bombs slap onto them from all sides.
+        # Four mini sticky bombs slapped onto them; they ride along on the
+        # victim until they go off.
         blast = 1.2 + min(1.0, charge / 1000.0)  # Charge widens them.
         for i in range(4):
             ang = i * math.pi / 2 + math.pi / 4
-            out = (math.cos(ang), 0.0, math.sin(ang))
+            off = (math.cos(ang) * 0.35, 0.15 * (1 if i % 2 else -1),
+                   math.sin(ang) * 0.35)
             mini = Bomb(
-                position=(vpos[0] + out[0] * 0.4, vpos[1] + 0.2,
-                          vpos[2] + out[2] * 0.4),
-                velocity=(-out[0] * 3.0, 0.0, -out[2] * 3.0),
+                position=tuple(vpos[k] + off[k] for k in range(3)),
+                velocity=(0.0, 0.0, 0.0),
                 bomb_type='sticky',
                 blast_radius=blast,
                 bomb_scale=0.5,
                 source_player=source,
                 owner=node,
             ).autoretain()
+            state['minis'].append((mini, off))
             bs.timer(WHIP_FUSE + 0.1 * i,
                      bs.WeakCallStrict(mini.handlemessage, ExplodeMessage()))
 
     def _step() -> None:
         state['time'] += _TICK
         tnow = state['time']
-        if not node or not spaz.is_alive():
-            _finish()
-            return
-        base = _base()
-        tip = state['tip']
         phase = state['phase']
-
-        if phase == 'out':
-            victim = target.getdelegate(Spaz) if target else None
-            homing = victim is not None and victim.is_alive()
-            goal = target.position_center if homing else straight_end
-            move, dist = _norm([a - b for a, b in zip(goal, tip)])
-            step = WHIP_SPEED * _TICK
-            tip = goal if dist <= step else tuple(
-                tip[k] + move[k] * step for k in range(3))
-            state['tip'] = tip
-            if homing and _norm([a - b for a, b in
-                                 zip(target.position_center, tip)])[1] < 0.6:
-                _latch(target)
-            elif not homing:
-                # No aim: grab the first enemy the tip brushes past.
-                for vnode in _tentacle_targets(spaz, tip):
-                    if _norm([a - b for a, b in
-                              zip(vnode.position_center, tip)])[1] < 0.8:
-                        _latch(vnode)
-                        break
+        if phase == 'rise':
+            # Shoots up out of the ground, reaching for its victim.
+            grow = min(1.0, tnow / 0.25)
+            if target is not None and target.getdelegate(Spaz) is not None:
+                goal = target.position_center
+            else:
+                goal = (base[0], base[1] + WHIP_HEIGHT, base[2])
+            tip = tuple(base[k] + (goal[k] - base[k]) * grow
+                        for k in range(3))
+            if grow >= 1.0:
+                victim = target if target is not None else None
+                if victim is None:
+                    for vnode in _tentacle_targets(spaz, base):
+                        if math.hypot(vnode.position[0] - base[0],
+                                      vnode.position[2] - base[2]) < 1.6:
+                            victim = vnode
+                            break
+                alive = victim.getdelegate(Spaz) if victim else None
+                if alive is not None and alive.is_alive():
+                    _latch(victim)
                 else:
-                    if dist <= step or tnow > 0.8:
-                        state['phase'] = 'back'
-            if tnow > 0.8 and state['phase'] == 'out':
-                state['phase'] = 'back'
+                    state['phase'] = 'flail'
+                    state['flail_until'] = tnow + 0.6
         elif phase == 'hold':
             vnode = state['victim']
-            if vnode:
-                state['tip'] = tip = vnode.position_center
+            vpos = vnode.position_center if vnode else (
+                base[0], base[1] + WHIP_HEIGHT * 0.6, base[2])
+            # Wrapped round them, swaying.
+            tip = (vpos[0] + 0.25 * math.cos(tnow * 8.0), vpos[1] + 0.2,
+                   vpos[2] + 0.25 * math.sin(tnow * 8.0))
+            for mini, off in state['minis']:
+                if mini.node and vnode:
+                    goal = tuple(vpos[k] + off[k] for k in range(3))
+                    mini.node.velocity = tuple(
+                        (g - p) * 15.0 for g, p in zip(goal, mini.node.position))
             if tnow >= state['hold_until'] or not vnode:
-                state['phase'] = 'back'
+                state['phase'] = 'sink'
+                state['sink_from'] = tip
+                state['sink_at'] = tnow
                 _snd('swip', 0.8, base)
-        else:  # Reeling back in.
-            move, dist = _norm([a - b for a, b in zip(base, tip)])
-            step = WHIP_SPEED * 1.3 * _TICK
-            if dist <= step:
+        elif phase == 'flail':
+            tip = (base[0] + 0.8 * math.cos(tnow * 6.0),
+                   base[1] + WHIP_HEIGHT * (0.8 + 0.1 * math.sin(tnow * 9)),
+                   base[2] + 0.8 * math.sin(tnow * 6.0))
+            if tnow >= state['flail_until']:
+                state['phase'] = 'sink'
+                state['sink_from'] = tip
+                state['sink_at'] = tnow
+        else:  # Sinking back into the ground.
+            frac = min(1.0, (tnow - state['sink_at']) / 0.3)
+            src = state['sink_from']
+            tip = tuple(src[k] + (base[k] - src[k]) * frac for k in range(3))
+            if frac >= 1.0:
                 _finish()
                 return
-            state['tip'] = tip = tuple(tip[k] + move[k] * step
-                                       for k in range(3))
-
-        amp = 0.3 if state['phase'] == 'out' else 0.12
+        state['tip'] = tip
+        amp = 0.35 if state['phase'] in ('rise', 'flail') else 0.15
         try:
-            pts = _tentacle_curve(base, state['tip'], tnow * 14.0, amp,
-                                  _WHIP_SEGMENTS)
+            pts = _whip_curve(base, tip, tnow * 12.0, amp, _WHIP_SEGMENTS)
             _draw_tentacle(beads, pts, True)
-            bs.emitfx(position=state['tip'], velocity=(0, -1, 0), count=1,
-                      scale=0.4, spread=0.05, chunk_type='slime')
         except Exception:
             _BEADS_OK[0] = False  # Visuals must never stop the whip.
 
@@ -1240,6 +1443,20 @@ def _show_qte_key(spaz: Spaz) -> None:
             old.delete()
     key = qte['keys'][qte['idx']]
     tex_name, label, color = _QTE_KEYS[key]
+    # A big glow in the button's color behind it: readable at a glance.
+    glow = bs.newnode(
+        'image',
+        attrs={
+            'texture': _classicassets.textures.light_soft.get(),
+            'position': (0, 0),
+            'scale': (10, 10),
+            'attach': 'center',
+            'absolute_scale': True,
+            'color': color,
+        },
+    )
+    bs.animate_array(glow, 'scale', 2,
+                     {0: (10, 10), 0.1: (520, 520), 0.18: (440, 440)})
     img = bs.newnode(
         'image',
         attrs={
@@ -1248,7 +1465,7 @@ def _show_qte_key(spaz: Spaz) -> None:
             'scale': (10, 10),
             'attach': 'center',
             'absolute_scale': True,
-            'color': (1.0, 1.0, 1.0),
+            'color': tuple(0.5 + 0.5 * c for c in color),  # Tinted.
         },
     )
     bs.animate_array(img, 'scale', 2,
@@ -1256,7 +1473,7 @@ def _show_qte_key(spaz: Spaz) -> None:
     text = _screen_text(label, (0, -130), color, 1.6)
     step = _screen_text(f'{qte["idx"] + 1} / {NUKE_QTE_KEYS}', (0, -175),
                         (0.8, 0.8, 0.8), 0.9)
-    qte['nodes'] = [img, text, step]
+    qte['nodes'] = [glow, img, text, step]
     _snd('race_beep1', 0.8)
 
 
