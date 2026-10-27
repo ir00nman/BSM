@@ -66,6 +66,7 @@ if TYPE_CHECKING:
 
 IMPACT_SPEED = 22.0  # Скорость ударной бомбы после удара (м/с).
 IMPACT_FLIGHT_TIME = 4.0  # Сколько она ищет путь к врагу, потом взрывается.
+IMPACT_STEER = 0.3  # Плавность разворотов в полёте (1.0 — мгновенно).
 IMPACT_RANGE = 25.0  # Дальность поиска врага для неё (метров).
 IMPACT_ANGLE = 45.0  # Насколько враг может быть в стороне от удара (градусов).
 ICE_FISTS_TIME = 8.0  # Ледяные кулаки: базовая длительность (сек)...
@@ -292,8 +293,8 @@ def _avoid_dirs(want: Sequence[float]) -> list[tuple[float, float, float]]:
         side = (1.0, 0.0, 0.0)
     out = []
     for vert, horiz in ((1, 1), (1, -1), (0, 1), (0, -1), (-1, 1), (-1, -1)):
-        vec = [want[i] * 0.25 + side[i] * 0.8 * horiz for i in range(3)]
-        vec[1] += 0.9 * vert
+        vec = [want[i] * 0.5 + side[i] * 0.7 * horiz for i in range(3)]
+        vec[1] += 0.5 * vert  # A gentle climb/dive, not a straight jump.
         out.append(_norm(vec)[0])
     return out
 
@@ -343,6 +344,7 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
     state: dict[str, Any] = {
         'time': 0.0,
         'dir': direction,
+        'vel': tuple(c * IMPACT_SPEED for c in direction),
         'last': bnode.position,
         'slow': 0,
         'avoid_until': 0.0,
@@ -374,34 +376,47 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
                 _stop()
                 bomb.handlemessage(ExplodeMessage())
                 return
-            want, dist = _norm(
-                [a - b for a, b in zip(target.position_center, bpos)]
-            )
-            if dist < 0.9 + IMPACT_SPEED * _TICK:
+            tpos = target.position_center
+            want, dist = _norm([a - b for a, b in zip(tpos, bpos)])
+            # It goes off when it physically touches them (see
+            # _patched_bomb_handle_impact); this is only a backstop.
+            if dist < 0.55:
                 _stop()
                 _snd('big_impact', 1.0, bpos)
-                bomb.handlemessage(ExplodeMessage())  # Goes off on contact.
+                bomb.handlemessage(ExplodeMessage())
                 return
+            # Aim a little above their middle so the line clears slopes
+            # (domes like Doom Shroom).
+            want, _ = _norm((tpos[0] - bpos[0], tpos[1] + 0.25 - bpos[1],
+                             tpos[2] - bpos[2]))
 
-            # Stuck against something (barely moving, or bumped it)? Try
-            # going over, under or around it, a different way each time.
+            # Truly stuck (barely moving for a while)? Try going over,
+            # under or around it, a different way each time.
             _, moved = _norm([a - b for a, b in zip(bpos, state['last'])])
-            bumped = bs.time() - getattr(bomb, '_bst_bump_time', -9.0) < 0.1
-            if tnow > 0.1 and (moved < IMPACT_SPEED * _TICK * 0.35 or bumped):
+            _, speed_now = _norm(state['vel'])
+            if tnow > 0.15 and moved < speed_now * _TICK * 0.35:
                 state['slow'] += 1
             else:
                 state['slow'] = 0
-            if state['slow'] >= 2 and tnow >= state['avoid_until']:
+            if state['slow'] >= 4 and tnow >= state['avoid_until']:
                 dirs = _avoid_dirs(want)
                 state['avoid_dir'] = dirs[state['attempt'] % len(dirs)]
                 state['attempt'] += 1
-                state['avoid_until'] = tnow + 0.18
+                state['avoid_until'] = tnow + 0.15
                 state['slow'] = 0
             fdir = state['avoid_dir'] if tnow < state['avoid_until'] else want
+            # Scraping the floor: just lift off it a bit and slide along.
+            if bs.time() - getattr(bomb, '_bst_bump_time', -9.0) < 0.12:
+                fdir, _ = _norm((fdir[0], fdir[1] + 0.35, fdir[2]))
             state['dir'] = fdir
 
         state['last'] = bpos
-        bnode.velocity = tuple(c * IMPACT_SPEED for c in fdir)
+        # Turn smoothly instead of snapping to the new heading.
+        goal = tuple(c * IMPACT_SPEED for c in fdir)
+        vel = tuple(v + (g - v) * IMPACT_STEER
+                    for v, g in zip(state['vel'], goal))
+        state['vel'] = vel
+        bnode.velocity = vel
         bs.emitfx(position=bpos, velocity=tuple(-c * 2.0 for c in fdir),
                   count=2, scale=0.5, spread=0.1, chunk_type='spark')
 
