@@ -15,7 +15,17 @@
     не взрывается о стены и пол и обходит препятствия — вверх, вниз или в
     сторону, так что долетает и на «Счастливых мыслях»; взрывается при
     касании врага, заряд уходит в её взрыв. Если впереди никого нет — летит
-    прямо и взрывается обо что угодно.
+    прямо и взрывается обо что угодно;
+  * пинг-понг: цель может отбить летящую в неё бомбу любым ударом — та,
+    как мячик, летит обратно в пославшего, и теперь отбить может уже он.
+    Так её можно гонять туда-обратно (каждый раз чуть быстрее), пока
+    кто-нибудь не пропустит.
+
+Обычная бомба, заряжен:
+  удар кулаком по своей летящей бомбе — она превращается в 4 мини-снаряда
+  (счётчик над головой). Каждое нажатие «Бомба» выпускает один снаряд прямо
+  по взгляду: летит не падая и взрывается от касания; заряд бомбы делится
+  между снарядами поровну.
 
 Ледяная бомба, заряжен:
   * удар кулаком по своей ледяной бомбе — бомба рассыпается льдом, а боец
@@ -62,13 +72,19 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.8'
+BSM_VERSION = '2.9'
 
 # ------------------------------- Настройки --------------------------------
 
 IMPACT_SPEED = 22.0  # Скорость ударной бомбы после удара (м/с).
 IMPACT_FLIGHT_TIME = 4.0  # Сколько она ищет путь к врагу, потом взрывается.
 IMPACT_STEER = 0.3  # Плавность разворотов в полёте (1.0 — мгновенно).
+DEFLECT_SPEEDUP = 1.15  # Во сколько раз быстрее после каждого отбивания...
+DEFLECT_MAX_SPEED = 44.0  # ...но не быстрее этого (м/с).
+SHOT_COUNT = 4  # Сколько мини-снарядов даёт отбитая заряженная бомба.
+SHOT_MAX = 8  # Сколько снарядов можно носить.
+SHOT_SPEED = 20.0  # Скорость снаряда (м/с).
+SHOT_LIFETIME = 3.0  # Через сколько секунд снаряд взрывается сам.
 IMPACT_RANGE = 25.0  # Дальность поиска врага для неё (метров).
 IMPACT_ANGLE = 45.0  # Насколько враг может быть в стороне от удара (градусов).
 ICE_FISTS_TIME = 8.0  # Ледяные кулаки: базовая длительность (сек)...
@@ -354,8 +370,12 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
         _seq(target.position, (0, 'activate_beep', 0.8),
              (0.08, 'race_beep1', 0.5))
 
+    # Kept on the bomb so a punch from its target can turn it around.
     state: dict[str, Any] = {
         'time': 0.0,
+        'target': target,
+        'sender': node,
+        'speed': IMPACT_SPEED,
         'dir': direction,
         'vel': tuple(c * IMPACT_SPEED for c in direction),
         'last': bnode.position,
@@ -364,6 +384,7 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
         'avoid_dir': direction,
         'attempt': 0,
     }
+    bomb._bst_homing = state  # type: ignore[attr-defined]
 
     def _stop() -> None:
         bomb._bst_flight = None  # type: ignore[attr-defined]
@@ -375,6 +396,8 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
             return
         tnow = state['time']
         bpos = bnode.position
+        target = state['target']
+        speed = state['speed']
 
         if target is None:
             if tnow > 2.0:
@@ -425,7 +448,7 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
 
         state['last'] = bpos
         # Turn smoothly instead of snapping to the new heading.
-        goal = tuple(c * IMPACT_SPEED for c in fdir)
+        goal = tuple(c * speed for c in fdir)
         vel = tuple(v + (g - v) * IMPACT_STEER
                     for v, g in zip(state['vel'], goal))
         state['vel'] = vel
@@ -439,6 +462,130 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
         _TICK, _step, repeat=True
     )
     _step()
+
+
+def _deflect_homing(spaz: Spaz, bomb: Bomb) -> None:
+    """Its target punched the homing bomb: back like a ball at the sender."""
+    state = bomb._bst_homing  # type: ignore[attr-defined]
+    node = spaz.node
+    back_to = state['sender']
+    other = back_to.getdelegate(Spaz) if back_to else None
+    if other is None or not other.is_alive():
+        back_to = None
+    bpos = bomb.node.position
+    if back_to is not None:
+        heading, _ = _norm([a - b for a, b in zip(back_to.position_center,
+                                                  bpos)])
+    else:
+        heading, _ = _norm(node.punch_velocity)
+        bomb._bst_levitate = False  # type: ignore[attr-defined]
+    speed = min(DEFLECT_MAX_SPEED, state['speed'] * DEFLECT_SPEEDUP)
+    state.update({
+        'target': back_to,
+        'sender': node,
+        'speed': speed,
+        'time': 0.0,
+        'dir': heading,
+        'vel': tuple(c * speed for c in heading),  # Bounces right back.
+        'slow': 0,
+        'avoid_until': 0.0,
+        'attempt': 0,
+    })
+    # The deflector is now the one it won't go off on, and gets the credit.
+    bomb.owner = node
+    if spaz.source_player is not None:
+        bomb._source_player = spaz.source_player  # type: ignore[attr-defined]
+    bomb.node.velocity = state['vel']
+
+    ppos = node.punch_position
+    _flash(ppos, _bright(_color(spaz), 2.0), 0.6, 1.0, 1.5, 0.15)
+    bs.emitfx(position=bpos, velocity=tuple(c * 8.0 for c in heading),
+              count=20, scale=0.8, spread=0.25, chunk_type='spark')
+    _shake(0.8)
+    _seq(bpos, (0, 'punch_strong01', 1.0), (0, 'impact_hard', 0.8),
+         (0.02, 'swip2', 0.9))
+    if back_to is not None:
+        _snd('activate_beep', 0.8, back_to.position)
+
+
+def _bomb_to_shots(spaz: Spaz, bomb: Bomb) -> None:
+    """Charged punch on our flying bomb: it breaks into mini shells."""
+    charge = _bomb_charge(bomb) or Spaz.bsm_take_charge(spaz)
+    bpos = bomb.node.position
+    bomb.handlemessage(bs.DieMessage())  # Consumed, never goes off.
+    spaz._bst_shots = min(SHOT_MAX, spaz._bst_shots + SHOT_COUNT)
+    spaz._bst_shot_charge += charge
+    _update_counter(spaz)
+
+    bs.emitfx(position=bpos, velocity=(0, 3, 0), count=15, scale=0.7,
+              spread=0.4, chunk_type='metal')
+    bs.emitfx(position=bpos, velocity=(0, 4, 0), count=25, scale=0.8,
+              spread=0.5, chunk_type='spark')
+    _flash(bpos, _bright(_color(spaz), 1.5), 0.6, 1.0, 1.5, 0.2)
+    _snd('metal_hit', 1.0, bpos)
+    _snd('cork_pop', 0.8, bpos)
+    _snd('powerup01', 0.7, bpos)
+    _popup_text(f'СНАРЯДЫ x{SHOT_COUNT}', spaz.node.position,
+                _bright(_color(spaz), 1.0))
+
+
+def _fire_shot(spaz: Spaz) -> None:
+    """One mini shell straight where the fighter looks; it doesn't drop."""
+    node = spaz.node
+    share = spaz._bst_shot_charge / max(spaz._bst_shots, 1)
+    spaz._bst_shot_charge -= share
+    spaz._bst_shots -= 1
+    _update_counter(spaz)
+
+    facing, flen = _norm((node.position_forward[0] - node.position[0], 0.0,
+                          node.position_forward[2] - node.position[2]))
+    if flen < 1e-4:
+        facing = (1.0, 0.0, 0.0)
+    center = node.position_center
+    start = (center[0] + facing[0] * 0.8, center[1] + 0.2,
+             center[2] + facing[2] * 0.8)
+    vel = tuple(c * SHOT_SPEED for c in facing)
+    shot = Bomb(
+        position=start,
+        velocity=vel,
+        bomb_type='impact',
+        blast_radius=2.0 / 0.7,  # Impact bombs shrink theirs; keep it full.
+        bomb_scale=0.5,
+        source_player=spaz.source_player,
+        owner=node,
+    ).autoretain()
+    # Goes off on touching anything right away (not after arming).
+    shot._add_material(  # pylint: disable=protected-access
+        BombFactory.get().land_mine_blast_material
+    )
+    if share > 0:
+        hook = getattr(Spaz, 'bsm_charge_projectile_amount', None)
+        if hook is not None:
+            hook(spaz, shot, share)
+
+    snode = shot.node
+    state = {'time': 0.0}
+
+    def _step() -> None:
+        state['time'] += _TICK
+        if not snode or getattr(shot, '_exploded', False):
+            shot._bst_flight = None  # type: ignore[attr-defined]
+            return
+        if state['time'] > SHOT_LIFETIME:
+            shot._bst_flight = None  # type: ignore[attr-defined]
+            shot.handlemessage(ExplodeMessage())
+            return
+        snode.velocity = vel  # Dead straight, no drop.
+        bs.emitfx(position=snode.position,
+                  velocity=tuple(-c * 0.1 for c in vel), count=2, scale=0.4,
+                  spread=0.05, chunk_type='spark')
+
+    shot._bst_flight = bs.Timer(  # type: ignore[attr-defined]
+        _TICK, _step, repeat=True
+    )
+    _snd('laser', 0.6, start)
+    _snd('swip2', 0.8, start)
+    _snd('cork_pop', 0.6, start)
 
 
 # ------------------------------- Beads ------------------------------------
@@ -661,13 +808,17 @@ _WHIP_SEGMENTS = 10
 
 
 def _update_counter(spaz: Spaz) -> None:
-    """Whips show in the counter over the head (mines once out of them)."""
+    """Whips, then shells, show in the counter over the head (mines once out
+    of both) - in the order the bomb button uses them."""
     node = spaz.node
     if not node:
         return
     if spaz._bst_whips > 0:
         node.counter_text = f'x{spaz._bst_whips}'
         node.counter_texture = _classicassets.textures.powerup_sticky_bombs.get()
+    elif spaz._bst_shots > 0:
+        node.counter_text = f'x{spaz._bst_shots}'
+        node.counter_texture = _classicassets.textures.powerup_bomb.get()
     else:
         _orig_set_land_mine_count(spaz, spaz.land_mine_count)
 
@@ -991,6 +1142,8 @@ def _patched_init(self: Spaz, *args: Any, **kwargs: Any) -> None:
     self._bst_whip_charge = 0.0
     self._bst_whip_active = False
     self._bst_whip_timer: bs.Timer | None = None
+    self._bst_shots = 0
+    self._bst_shot_charge = 0.0
 
 
 def _patched_handlemessage(self: Spaz, msg: Any) -> Any:
@@ -1004,8 +1157,33 @@ def _patched_handlemessage(self: Spaz, msg: Any) -> Any:
             hit = None
         fresh = hit is not None and hit not in self._punched_nodes
 
-        # Charged punch on our own impact/ice bomb.
         bomb = hit.getdelegate(Bomb) if fresh else None
+
+        # Ping-pong: the homing bomb's target knocks it back at the sender.
+        homing = getattr(bomb, '_bst_homing', None)
+        if (
+            homing is not None
+            and getattr(bomb, '_bst_flight', None) is not None
+            and homing['target'] is not None
+            and homing['target'] == self.node
+        ):
+            self._punched_nodes.add(hit)
+            _deflect_homing(self, bomb)
+            return None
+
+        # Charged punch on our own flying normal bomb: mini shells.
+        if (
+            bomb is not None
+            and bomb.bomb_type == 'normal'
+            and _is_own_bomb(self, bomb)
+            and (_charged(self) or _bomb_charge(bomb) > 0)
+            and _norm(bomb.node.velocity)[1] > 1.5
+        ):
+            self._punched_nodes.add(hit)
+            _bomb_to_shots(self, bomb)
+            return None
+
+        # Charged punch on our own impact/ice/sticky bomb.
         if (
             bomb is not None
             and bomb.bomb_type in ('impact', 'ice', 'sticky')
@@ -1045,6 +1223,9 @@ def _patched_drop_bomb(self: Spaz) -> Bomb | None:
             _fire_whip(self)
         # Not a bomb: other plugins/games shouldn't treat it as one.
         return None
+    if getattr(self, '_bst_shots', 0) > 0 and self.node and not self.frozen:
+        _fire_shot(self)
+        return None
     # Checked before the call: Absorb Shield may spend the charge inside it.
     charged = _charged(self)
     bomb = _orig_drop_bomb(self)
@@ -1061,7 +1242,7 @@ def _patched_drop_bomb(self: Spaz) -> Bomb | None:
 
 def _patched_set_land_mine_count(self: Spaz, count: int) -> None:
     _orig_set_land_mine_count(self, count)
-    if getattr(self, '_bst_whips', 0) > 0:
+    if getattr(self, '_bst_whips', 0) > 0 or getattr(self, '_bst_shots', 0) > 0:
         _update_counter(self)
 
 

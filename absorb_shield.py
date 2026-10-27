@@ -6,8 +6,8 @@
 копится в заряд, и боец светится основным цветом своего скина. Следующая
 атака выпускает заряд:
   * удар кулаком — весь заряд входит в этот же удар (один удар, а не два);
-  * с плагином BSM Boosters заряд работает и через удар по своей ударной
-    или ледяной бомбе (плагины складываются друг с другом);
+  * с плагином BSM Boosters заряд работает и через удар по своим бомбам
+    (плагины складываются друг с другом);
   * бомба — бомба светится и при взрыве бьёт всех вокруг накопленным уроном;
     заряженная ледяная бомба вдобавок пускает морозную волну, которая
     замораживает всех в радиусе её взрыва.
@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.8'
+BSM_VERSION = '2.9'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -1051,8 +1051,12 @@ def _blast_bonus_fallback(target: bs.Node, entry: dict,
     )
 
 
-def _power_up_bomb(spaz: Spaz, bomb: Bomb) -> None:
-    amount = _take_charge(spaz)
+def _power_up_bomb(spaz: Spaz, bomb: Bomb,
+                   amount: float | None = None) -> None:
+    """Put charge into a bomb: the spaz's whole charge, or a given amount
+    (then the spaz keeps theirs)."""
+    if amount is None:
+        amount = _take_charge(spaz)
     if amount <= 0 or not bomb.node:
         return
     # Other BSM plugins can tell (and spend) a charged bomb by this.
@@ -1265,6 +1269,13 @@ def _hook_charge_projectile(spaz: Spaz, projectile: Any) -> bool:
     return True
 
 
+def _hook_charge_projectile_amount(spaz: Spaz, projectile: Any,
+                                   amount: float) -> None:
+    """Put a given amount of charge into a projectile (not the spaz's)."""
+    if amount > 0 and spaz.node:
+        _power_up_bomb(spaz, projectile, amount)
+
+
 # ba_meta export babase.Plugin
 class AbsorbShieldPlugin(babase.Plugin):
     """Parry shield that absorbs damage and returns it with the next hit."""
@@ -1287,6 +1298,9 @@ class AbsorbShieldPlugin(babase.Plugin):
         # Hooks other BSM plugins use to spend the charge (see boosters.py).
         Spaz.bsm_take_charge = staticmethod(_hook_take_charge)
         Spaz.bsm_charge_projectile = staticmethod(_hook_charge_projectile)
+        Spaz.bsm_charge_projectile_amount = staticmethod(
+            _hook_charge_projectile_amount
+        )
 
         Spaz.__init__ = _patched_init
         Spaz.handlemessage = _patched_handlemessage
