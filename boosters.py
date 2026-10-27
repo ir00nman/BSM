@@ -24,8 +24,20 @@
 Обычная бомба, заряжен:
   удар кулаком по своей летящей бомбе — она превращается в 4 мини-снаряда
   (счётчик над головой). Каждое нажатие «Бомба» выпускает один снаряд прямо
-  по взгляду: летит не падая и взрывается от касания; заряд бомбы делится
-  между снарядами поровну.
+  по взгляду: летит не падая и при попадании отнимает 50% здоровья
+  небольшим аккуратным взрывом.
+
+Мина, заряжен:
+  заряженная мина, взведясь, разбрасывает вокруг себя ещё 6 мин; они ложатся
+  по рельефу, а те, что свалились с обрыва или в пропасть, исчезают — так
+  что сколько их останется и где, зависит от местности.
+
+Ядерный суицид (нужен Absorb Shield):
+  подобрал проклятие («суицид») и спарировал щитом его взрыв — открывается
+  QTE на 3 секунды: по одной показываются 4 кнопки, жми их по порядку.
+  Успел без ошибок — тревога, отсчёт, на последней секунде замедление и
+  наезд камеры, и боец взрывается ядерной бомбой, унося с собой всех на
+  карте. Ошибся или не успел — обычный взрыв проклятия.
 
 Ледяная бомба, заряжен:
   * удар кулаком по своей ледяной бомбе — бомба рассыпается льдом, а боец
@@ -62,7 +74,12 @@ from typing import TYPE_CHECKING
 import babase
 import bascenev1 as bs
 from bascenev1 import _classicassets
-from bascenev1lib.actor.bomb import Bomb, BombFactory, ExplodeMessage
+from bascenev1lib.actor.bomb import (
+    ArmMessage,
+    Bomb,
+    BombFactory,
+    ExplodeMessage,
+)
 from bascenev1lib.actor.playerspaz import PlayerSpaz
 from bascenev1lib.actor.spaz import PunchHitMessage, Spaz
 
@@ -72,7 +89,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.10'
+BSM_VERSION = '2.11'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -85,6 +102,14 @@ SHOT_COUNT = 4  # Сколько мини-снарядов даёт отбита
 SHOT_MAX = 8  # Сколько снарядов можно носить.
 SHOT_SPEED = 20.0  # Скорость снаряда (м/с).
 SHOT_LIFETIME = 3.0  # Через сколько секунд снаряд взрывается сам.
+SHOT_DAMAGE = 500.0  # Урон снаряда (1000 = полное здоровье).
+SHOT_BLAST_RADIUS = 1.2  # Радиус небольшого взрыва снаряда (метров).
+MINE_SPREAD_COUNT = 6  # Сколько мин разбрасывает заряженная мина.
+MINE_SPREAD_MIN = 1.8  # Ближе этого мины не ложатся (метров)...
+MINE_SPREAD_MAX = 3.2  # ...и не дальше этого.
+NUKE_QTE_TIME = 3.0  # Время на QTE ядерного суицида (сек).
+NUKE_QTE_KEYS = 4  # Сколько кнопок нужно нажать.
+NUKE_COUNTDOWN = 3.0  # Отсчёт до ядерного взрыва после QTE (сек).
 IMPACT_RANGE = 25.0  # Дальность поиска врага для неё (метров).
 IMPACT_ANGLE = 45.0  # Насколько враг может быть в стороне от удара (градусов).
 ICE_FISTS_TIME = 8.0  # Ледяные кулаки: базовая длительность (сек)...
@@ -117,6 +142,11 @@ _orig_drop_bomb: Any = None
 _orig_bomb_handle_impact: Any = None
 _orig_bomb_handlemessage: Any = None
 _orig_set_land_mine_count: Any = None
+_orig_curse_explode: Any = None
+_orig_jump_press: Any = None
+_orig_punch_press: Any = None
+_orig_bomb_press: Any = None
+_orig_pickup_press: Any = None
 
 _SLIME = (0.45, 1.4, 0.35)  # Tentacle color (glowing slime green).
 
@@ -529,6 +559,46 @@ def _deflect_homing(spaz: Spaz, bomb: Bomb) -> None:
         _snd('activate_beep', 0.8, back_to.position)
 
 
+def _shell_pop(shell: Bomb) -> None:
+    """A mini shell hits: half a health bar off whoever it got, with a
+    small, tidy blast (no big shock wave)."""
+    if getattr(shell, '_exploded', False) or not shell.node:
+        return
+    shell._exploded = True  # pylint: disable=protected-access
+    shell._bst_flight = None  # type: ignore[attr-defined]
+    pos = shell.node.position
+    source = shell.get_source_player(bs.Player)
+    owner = shell.owner
+    for node in bs.getnodes():
+        if not node or node == owner or node.getnodetype() != 'spaz':
+            continue
+        away, dist = _norm([a - b for a, b in zip(node.position_center,
+                                                  pos)])
+        if dist > SHOT_BLAST_RADIUS:
+            continue
+        node.handlemessage(
+            bs.HitMessage(
+                pos=node.position_center,
+                source_player=bs.existing(source),
+                force_direction=away,
+                flat_damage=SHOT_DAMAGE,
+                hit_type='explosion',
+                hit_subtype='normal',
+            )
+        )
+        node.handlemessage(
+            'impulse', pos[0], pos[1], pos[2], 0.0, 0.0, 0.0,
+            250.0, 20.0, 0.0, 0, away[0], away[1] + 0.3, away[2],
+        )
+    expl = bs.newnode('explosion', attrs={'position': pos, 'radius': 0.45})
+    bs.timer(1.0, expl.delete)
+    bs.emitfx(position=pos, velocity=(0, 2, 0), count=15, scale=0.6,
+              spread=0.3, chunk_type='spark')
+    _snd('explosion01', 0.6, pos)
+    _snd('impact_hard', 0.8, pos)
+    shell.handlemessage(bs.DieMessage())
+
+
 def _bomb_to_shots(spaz: Spaz, bomb: Bomb) -> None:
     """Charged punch on our flying bomb: it breaks into mini shells."""
     charge = _bomb_charge(bomb) or Spaz.bsm_take_charge(spaz)
@@ -553,8 +623,6 @@ def _bomb_to_shots(spaz: Spaz, bomb: Bomb) -> None:
 def _fire_shot(spaz: Spaz) -> None:
     """One mini shell straight where the fighter looks; it doesn't drop."""
     node = spaz.node
-    share = spaz._bst_shot_charge / max(spaz._bst_shots, 1)
-    spaz._bst_shot_charge -= share
     spaz._bst_shots -= 1
     _update_counter(spaz)
 
@@ -576,10 +644,7 @@ def _fire_shot(spaz: Spaz) -> None:
     shot._add_material(  # pylint: disable=protected-access
         BombFactory.get().land_mine_blast_material
     )
-    if share > 0:
-        hook = getattr(Spaz, 'bsm_charge_projectile_amount', None)
-        if hook is not None:
-            hook(spaz, shot, share)
+    shot._bst_shell = True  # type: ignore[attr-defined]
 
     snode = shot.node
     state = {'time': 0.0}
@@ -604,6 +669,55 @@ def _fire_shot(spaz: Spaz) -> None:
     _snd('laser', 0.6, start)
     _snd('swip2', 0.8, start)
     _snd('cork_pop', 0.6, start)
+
+
+def _spread_mines(mine: Bomb) -> None:
+    """A charged mine, once armed, tosses more mines around itself. They
+    settle wherever the ground takes them; any that drop off a ledge or
+    into the void are scrapped - so terrain decides how many and where."""
+    if not mine.node:
+        return
+    pos = mine.node.position
+    source = mine.get_source_player(bs.Player)
+    owner = mine.owner
+    flight = 0.55
+    base = random.uniform(0.0, 2.0 * math.pi)
+    tossed = []
+    for i in range(MINE_SPREAD_COUNT):
+        ang = (base + 2.0 * math.pi * i / MINE_SPREAD_COUNT
+               + random.uniform(-0.25, 0.25))
+        dist = random.uniform(MINE_SPREAD_MIN, MINE_SPREAD_MAX)
+        speed = dist / flight
+        extra = Bomb(
+            position=(pos[0], pos[1] + 0.5, pos[2]),
+            velocity=(math.cos(ang) * speed, 3.5, math.sin(ang) * speed),
+            bomb_type='land_mine',
+            source_player=source,
+            owner=owner,
+        ).autoretain()
+        tossed.append(extra)
+    bs.emitfx(position=pos, velocity=(0, 3, 0), count=12, scale=0.6,
+              spread=0.4, chunk_type='metal')
+    _snd('cork_pop', 1.0, pos)
+    _snd('bomb_drop01', 0.8, pos)
+
+    def _settle() -> None:
+        for extra in tossed:
+            if not extra.node:
+                continue
+            epos = extra.node.position
+            fell = epos[1] < pos[1] - 1.2
+            slid = math.hypot(epos[0] - pos[0], epos[2] - pos[2]) > (
+                MINE_SPREAD_MAX + 1.5)
+            if fell or slid:
+                # Off the edge: no place for a mine here.
+                bs.emitfx(position=epos, velocity=(0, 1, 0), count=6,
+                          scale=0.5, spread=0.2, chunk_type='spark')
+                extra.handlemessage(bs.DieMessage())
+            else:
+                extra.arm()
+
+    bs.timer(flight + 0.45, _settle)
 
 
 # ------------------------------- Beads ------------------------------------
@@ -1010,6 +1124,357 @@ def _fire_whip(spaz: Spaz) -> None:
     _step()
 
 
+# ---------------------------- Nuclear suicide -----------------------------
+
+_QTE_KEYS = {
+    'jump': ('button_jump', 'ПРЫЖОК', (0.3, 1.0, 0.3)),
+    'punch': ('button_punch', 'УДАР', (1.0, 0.85, 0.2)),
+    'bomb': ('button_bomb', 'БОМБА', (1.0, 0.3, 0.25)),
+    'pickup': ('button_pick_up', 'СХВАТИТЬ', (0.35, 0.6, 1.0)),
+}
+
+
+def _screen_text(text: str, pos: tuple, color: Sequence[float],
+                 scale: float) -> bs.Node:
+    return bs.newnode(
+        'text',
+        attrs={
+            'text': text,
+            'position': pos,
+            'h_attach': 'center',
+            'v_attach': 'center',
+            'h_align': 'center',
+            'v_align': 'center',
+            'color': (color[0], color[1], color[2], 1.0),
+            'scale': scale,
+            'shadow': 1.0,
+            'flatness': 1.0,
+        },
+    )
+
+
+def _start_nuke_qte(spaz: Spaz) -> None:
+    """The cursed one parried their own curse: a QTE decides the nuke."""
+    node = spaz.node
+    node.invincible = True  # Nothing may set the curse off mid-QTE.
+    spaz._curse_timer = None  # pylint: disable=protected-access
+    node.curse_death_time = 0
+    keys = [random.choice(list(_QTE_KEYS)) for _ in range(NUKE_QTE_KEYS)]
+    qte: dict[str, Any] = {'keys': keys, 'idx': 0, 'nodes': [],
+                           'time': 0.0, 'done': False}
+    spaz._bst_qte = qte
+
+    head = _screen_text('СПАРИРОВАЛ ПРОКЛЯТИЕ! ЖМИ!', (0, 170),
+                        (1.0, 0.35, 0.25), 1.4)
+    timer_text = _screen_text('', (0, 125), (1.0, 1.0, 1.0), 1.1)
+    qte['fixed'] = [head, timer_text]
+    _seq(node.position, (0, 'alarm', 0.7), (0, 'orchestra_hit3', 0.8),
+         (0.05, 'shield_hit', 0.8))
+    _show_qte_key(spaz)
+
+    def _tick() -> None:
+        if qte['done']:
+            return
+        qte['time'] += 0.05
+        left = NUKE_QTE_TIME - qte['time']
+        timer_text.text = f'{max(0.0, left):.1f}'
+        if left <= 0:
+            _qte_finish(spaz, success=False)
+
+    qte['timer'] = bs.Timer(0.05, _wcall(lambda s: _tick(), spaz),
+                            repeat=True)
+
+
+def _show_qte_key(spaz: Spaz) -> None:
+    qte = spaz._bst_qte
+    for old in qte['nodes']:
+        if old:
+            old.delete()
+    key = qte['keys'][qte['idx']]
+    tex_name, label, color = _QTE_KEYS[key]
+    img = bs.newnode(
+        'image',
+        attrs={
+            'texture': getattr(_classicassets.textures, tex_name).get(),
+            'position': (0, 0),
+            'scale': (10, 10),
+            'attach': 'center',
+            'absolute_scale': True,
+            'color': (1.0, 1.0, 1.0),
+        },
+    )
+    bs.animate_array(img, 'scale', 2,
+                     {0: (10, 10), 0.08: (230, 230), 0.14: (190, 190)})
+    text = _screen_text(label, (0, -130), color, 1.6)
+    step = _screen_text(f'{qte["idx"] + 1} / {NUKE_QTE_KEYS}', (0, -175),
+                        (0.8, 0.8, 0.8), 0.9)
+    qte['nodes'] = [img, text, step]
+    _snd('race_beep1', 0.8)
+
+
+def _qte_input(spaz: Spaz, key: str) -> None:
+    qte = spaz._bst_qte
+    if qte is None or qte['done']:
+        return
+    if key != qte['keys'][qte['idx']]:
+        _qte_finish(spaz, success=False)
+        return
+    qte['idx'] += 1
+    _snd('ding_small_high', 0.9)
+    if qte['idx'] >= NUKE_QTE_KEYS:
+        _qte_finish(spaz, success=True)
+    else:
+        _show_qte_key(spaz)
+
+
+def _qte_finish(spaz: Spaz, success: bool) -> None:
+    qte = spaz._bst_qte
+    if qte is None or qte['done']:
+        return
+    qte['done'] = True
+    qte['timer'] = None
+    for old in qte['nodes'] + qte['fixed']:
+        if old:
+            old.delete()
+    node = spaz.node
+    if not success:
+        spaz._bst_qte = None
+        _snd('boo', 0.6)
+        if node:
+            node.invincible = False
+            _orig_curse_explode(spaz)
+        return
+    _snd('race_beep2', 1.0)
+    _start_nuke(spaz)
+
+
+def _start_nuke(spaz: Spaz) -> None:
+    """Alarm and countdown; slow-mo and a close-up for the last second."""
+    node = spaz.node
+    activity = bs.getactivity()
+    gnode = activity.globalsnode
+    saved = {
+        'tint': tuple(gnode.tint),
+        'slow': gnode.slow_motion,
+        'aoi': tuple(gnode.area_of_interest_bounds),
+        'focus': {},
+    }
+    text = _screen_text('ЯДЕРНЫЙ ЗАРЯД', (0, 150), (1.0, 0.25, 0.15), 1.8)
+    count = _screen_text('3', (0, 80), (1.0, 1.0, 1.0), 2.2)
+    light = bs.newnode(
+        'light',
+        owner=node,
+        attrs={'color': (1.0, 0.15, 0.05), 'radius': 0.3,
+               'height_attenuated': False, 'volume_intensity_scale': 0.6},
+    )
+    node.connectattr('position_center', light, 'position')
+    bs.animate(light, 'intensity', {0: 0.5, 0.25: 2.0, 0.5: 0.5}, loop=True)
+    bs.animate(light, 'radius', {0: 0.3, NUKE_COUNTDOWN: 1.4})
+    _seq(node.position, (0, 'alarm', 1.0), (0, 'announce_three', 1.0),
+         (1.0, 'announce_two', 1.0), (2.0, 'announce_one', 1.0),
+         (2.0, 'laser', 0.8))
+    state = {'time': 0.0}
+
+    def _tick() -> None:
+        state['time'] += 0.05
+        tnow = state['time']
+        if not node or not spaz.is_alive():
+            # They died before it went off: put the world back.
+            holder.clear()
+            _restore_world(gnode, saved)
+            gnode.tint = saved['tint']
+            text.delete()
+            count.delete()
+            spaz._bst_qte = None
+            return
+        count.text = str(max(1, int(math.ceil(NUKE_COUNTDOWN - tnow))))
+        # The world goes red as it builds.
+        red = min(1.0, tnow / NUKE_COUNTDOWN)
+        orig = saved['tint']
+        gnode.tint = (orig[0] * (1.0 + 0.5 * red), orig[1] * (1.0 - 0.45 * red),
+                      orig[2] * (1.0 - 0.55 * red))
+        # Energy sucked into them from all around.
+        pos = node.position_center
+        ang = tnow * 9.0
+        out = (math.cos(ang) * 2.0, 0.6 * math.sin(ang * 1.7),
+               math.sin(ang) * 2.0)
+        bs.emitfx(position=tuple(pos[k] + out[k] for k in range(3)),
+                  velocity=tuple(-out[k] * 3.0 for k in range(3)),
+                  count=3, scale=0.7, spread=0.05, chunk_type='spark')
+        if int(tnow * 20) % 5 == 0:
+            _snd('tick', 0.7, pos)
+        if tnow >= NUKE_COUNTDOWN - 1.0 and not saved.get('zoomed'):
+            saved['zoomed'] = True
+            _nuke_close_up(gnode, node, saved)
+        if tnow >= NUKE_COUNTDOWN:
+            holder.clear()
+            text.delete()
+            count.delete()
+            _detonate(spaz, gnode, saved)
+
+    holder = [bs.Timer(0.05, _tick, repeat=True)]
+    _NUKE_TIMERS.append(holder)
+
+
+# Running nuke countdowns (nothing else in the game holds on to them).
+_NUKE_TIMERS: list[list] = []
+
+
+def _nuke_close_up(gnode: bs.Node, node: bs.Node, saved: dict) -> None:
+    """The last second: slow motion and the camera closing in on them."""
+    try:
+        gnode.slow_motion = True
+    except Exception:
+        pass
+    try:
+        pos = node.position
+        gnode.area_of_interest_bounds = (pos[0] - 2.5, pos[1] - 1.5,
+                                         pos[2] - 2.5, pos[0] + 2.5,
+                                         pos[1] + 2.5, pos[2] + 2.5)
+        for other in bs.getnodes():
+            if other and other != node and other.getnodetype() == 'spaz':
+                saved['focus'][other] = other.is_area_of_interest
+                other.is_area_of_interest = False
+    except Exception:
+        pass
+    bs.emitfx(position=node.position_center, emit_type='distortion',
+              spread=2.0)
+    _seq(node.position, (0, 'orchestra_hit_big2', 0.8), (0, 'hiss', 0.8))
+
+
+def _restore_world(gnode: bs.Node, saved: dict) -> None:
+    try:
+        gnode.slow_motion = saved['slow']
+        gnode.area_of_interest_bounds = saved['aoi']
+        for other, val in saved['focus'].items():
+            if other:
+                other.is_area_of_interest = val
+    except Exception:
+        pass
+
+
+def _detonate(spaz: Spaz, gnode: bs.Node, saved: dict) -> None:
+    """The nuke: blinding flash, a mushroom cloud, fire across the map, and
+    everyone on it gone (unless they parry the blast)."""
+    node = spaz.node
+    _restore_world(gnode, saved)
+    if not node:
+        gnode.tint = saved['tint']
+        return
+    center = node.position
+    source = spaz.source_player
+    bounds = saved['aoi']
+
+    # Blinding flash fading back to the normal light.
+    orig = saved['tint']
+    flash = (orig[0] * 3.0, orig[1] * 2.6, orig[2] * 2.2)
+    steps = 20
+    for i in range(steps + 1):
+        frac = i / steps
+        tint = tuple(f + (o - f) * frac for f, o in zip(flash, orig))
+        bs.timer(0.1 * i, bs.CallStrict(setattr, gnode, 'tint', tint))
+
+    # Fireball, then fire rolling out across the whole map.
+    core = bs.newnode('explosion', attrs={'position': center, 'radius': 6.0,
+                                         'big': True})
+    bs.timer(2.0, core.delete)
+    for i in range(14):
+        epos = (random.uniform(bounds[0], bounds[3]),
+                center[1] + random.uniform(-0.5, 1.5),
+                random.uniform(bounds[2], bounds[5]))
+        delay = 0.08 + 0.04 * i
+        bs.timer(delay, bs.CallStrict(_nuke_fire, epos))
+    # Mushroom cloud: a rising column with a cap.
+    for i in range(12):
+        bs.timer(0.05 * i, bs.CallStrict(
+            bs.emitfx, position=(center[0], center[1] + 0.8 * i, center[2]),
+            count=3, emit_type='tendrils', tendril_type='smoke'))
+    for i in range(10):
+        ang = 2.0 * math.pi * i / 10
+        bs.timer(0.6, bs.CallStrict(
+            bs.emitfx, position=(center[0] + math.cos(ang) * 2.5,
+                                 center[1] + 9.0,
+                                 center[2] + math.sin(ang) * 2.5),
+            count=2, emit_type='tendrils', tendril_type='smoke'))
+    # Shock ring rolling over the ground, debris everywhere.
+    for delay, opacity in ((0.0, 0.8), (0.12, 0.5)):
+        ring = bs.newnode(
+            'locator',
+            attrs={'shape': 'circleOutline', 'position': center,
+                   'color': (1.0, 0.6, 0.3), 'opacity': 0.0,
+                   'draw_beauty': False, 'additive': True},
+        )
+        bs.animate_array(ring, 'size', 1,
+                         {0: [0.5], delay: [0.5], delay + 1.2: [60.0]})
+        bs.animate(ring, 'opacity', {0: 0.0, delay: opacity,
+                                     delay + 1.2: 0.0})
+        bs.timer(delay + 1.3, ring.delete)
+    bs.emitfx(position=center, emit_type='distortion', spread=12.0)
+    for chunk, count in (('spark', 150), ('rock', 40), ('metal', 30)):
+        bs.emitfx(position=center, velocity=(0, 12, 0), count=count,
+                  scale=1.2, spread=4.0, chunk_type=chunk)
+    scorch = bs.newnode('scorch', attrs={'position': center, 'size': 5.0,
+                                         'big': True})
+    bs.animate(scorch, 'presence', {6.0: 1.0, 20.0: 0.0})
+    bs.timer(20.0, scorch.delete)
+    bs.camerashake(10.0)
+    _seq(center, (0, 'explosion01', 1.0), (0, 'explosion03', 1.0),
+         (0, 'big_impact', 1.0), (0, 'orchestra_hit_big1', 1.0),
+         (0.06, 'explosion05', 1.0), (0.1, 'big_impact2', 1.0),
+         (0.15, 'explosion02', 1.0), (0.2, 'orchestra_hit_big2', 0.9),
+         (0.25, 'cymbal', 0.8), (0.3, 'gong', 1.0), (0.4, 'explosion04', 0.9),
+         (0.6, 'debris_fall', 1.0), (0.9, 'wood_debris_fall', 0.9),
+         (1.2, 'gong', 0.6))
+
+    # Everyone on the map is swept away by the wave as it reaches them.
+    for other in bs.getnodes():
+        if not other or other.getnodetype() not in ('spaz', 'prop', 'bomb'):
+            continue
+        opos = other.position
+        away, dist = _norm([a - b for a, b in zip(opos, center)])
+        if dist < 0.01:
+            away = (0.0, 1.0, 0.0)
+        delay = min(1.0, dist / 30.0)
+        bs.timer(delay, bs.CallStrict(_nuke_hit, other, center, away,
+                                      source))
+    # The bomber goes with it.
+    node.invincible = False
+    spaz._bst_qte = None
+    spaz._cursed = False  # pylint: disable=protected-access
+    spaz.shatter(extreme=True)
+    spaz.handlemessage(bs.DieMessage())
+
+
+def _nuke_fire(pos: Sequence[float]) -> None:
+    expl = bs.newnode('explosion', attrs={'position': pos, 'radius': 2.5,
+                                         'big': True})
+    bs.timer(1.5, expl.delete)
+    _snd(random.choice(('explosion01', 'explosion02', 'explosion03',
+                        'explosion04', 'explosion05')), 0.7, pos)
+
+
+def _nuke_hit(other: bs.Node, center: Sequence[float],
+              away: Sequence[float], source: Any) -> None:
+    if not other:
+        return
+    opos = other.position
+    other.handlemessage(
+        'impulse', opos[0], opos[1], opos[2], 0.0, 0.0, 0.0,
+        3000.0, 200.0, 0.0, 0, away[0], away[1] + 0.6, away[2],
+    )
+    if other.getnodetype() == 'spaz':
+        other.handlemessage(
+            bs.HitMessage(
+                pos=opos,
+                source_player=bs.existing(source),
+                force_direction=away,
+                flat_damage=10000.0,
+                hit_type='explosion',
+                hit_subtype='normal',
+            )
+        )
+
+
 # --------------------------- Ice bomb + charge ----------------------------
 
 
@@ -1160,6 +1625,7 @@ def _patched_init(self: Spaz, *args: Any, **kwargs: Any) -> None:
     self._bst_whip_timer: bs.Timer | None = None
     self._bst_shots = 0
     self._bst_shot_charge = 0.0
+    self._bst_qte: dict | None = None
 
 
 def _patched_handlemessage(self: Spaz, msg: Any) -> Any:
@@ -1229,6 +1695,16 @@ def _patched_handlemessage(self: Spaz, msg: Any) -> Any:
 
     if isinstance(msg, bs.DieMessage) and self._bst_ice_nodes:
         _end_ice_fists(self)
+    if isinstance(msg, bs.DieMessage):
+        qte = self._bst_qte
+        if qte is not None and not qte['done']:
+            # Died mid-QTE (fell off, etc.): just clear the prompts.
+            qte['done'] = True
+            qte['timer'] = None
+            for old in qte['nodes'] + qte['fixed']:
+                if old:
+                    old.delete()
+            self._bst_qte = None
 
     return _orig_handlemessage(self, msg)
 
@@ -1248,6 +1724,8 @@ def _patched_drop_bomb(self: Spaz) -> Bomb | None:
     if bomb is not None and bomb.bomb_type == 'sticky' and charged:
         # Lashes out at enemies once thrown (see _start_tentacle).
         bomb._bst_tentacle_owner = weakref.ref(self)  # type: ignore[attr-defined]
+    if bomb is not None and bomb.bomb_type == 'land_mine' and charged:
+        bomb._bst_mine_spread = True  # type: ignore[attr-defined]
     if bomb is not None and bomb.bomb_type == 'ice' and charged:
         thrower = self.node
         bomb.add_explode_callback(
@@ -1263,7 +1741,13 @@ def _patched_set_land_mine_count(self: Spaz, count: int) -> None:
 
 
 def _patched_bomb_handlemessage(self: Bomb, msg: Any) -> Any:
+    if isinstance(msg, ExplodeMessage) and getattr(self, '_bst_shell', False):
+        _shell_pop(self)
+        return None
     result = _orig_bomb_handlemessage(self, msg)
+    if isinstance(msg, ArmMessage) and getattr(self, '_bst_mine_spread', False):
+        self._bst_mine_spread = False  # type: ignore[attr-defined]
+        _spread_mines(self)
     if getattr(self, '_bst_tentacle_owner', None) is not None:
         if isinstance(msg, bs.DroppedMessage):
             _start_tentacle(self)
@@ -1286,6 +1770,32 @@ def _patched_bomb_handle_impact(self: Bomb) -> None:
     _orig_bomb_handle_impact(self)
 
 
+def _patched_curse_explode(self: Spaz, source_player: Any = None) -> None:
+    if getattr(self, '_bst_qte', None) is not None:
+        return  # Mid-QTE or mid-countdown: the nuke decides now.
+    if (
+        self._cursed  # pylint: disable=protected-access
+        and self.node
+        and getattr(self, '_ab_active', False)  # Parried (Absorb Shield).
+        and isinstance(self, PlayerSpaz)
+    ):
+        _start_nuke_qte(self)
+        return
+    _orig_curse_explode(self, source_player)
+
+
+def _qte_press(key: str, orig_name: str) -> Any:
+    def _press(self: Spaz) -> None:
+        qte = getattr(self, '_bst_qte', None)
+        if qte is not None:
+            if not qte['done']:
+                _qte_input(self, key)
+            return  # The QTE (or the countdown) eats the button.
+        globals()[orig_name](self)
+
+    return _press
+
+
 # ba_meta export babase.Plugin
 class BoostersPlugin(babase.Plugin):
     """Impact and ice bomb add-ons."""
@@ -1299,13 +1809,20 @@ class BoostersPlugin(babase.Plugin):
 
         global _orig_init, _orig_handlemessage, _orig_drop_bomb
         global _orig_bomb_handle_impact, _orig_bomb_handlemessage
-        global _orig_set_land_mine_count
+        global _orig_set_land_mine_count, _orig_curse_explode
+        global _orig_jump_press, _orig_punch_press, _orig_bomb_press
+        global _orig_pickup_press
         _orig_init = Spaz.__init__
         _orig_handlemessage = Spaz.handlemessage
         _orig_drop_bomb = Spaz.drop_bomb
         _orig_bomb_handle_impact = Bomb._handle_impact
         _orig_bomb_handlemessage = Bomb.handlemessage
         _orig_set_land_mine_count = Spaz.set_land_mine_count
+        _orig_curse_explode = Spaz.curse_explode
+        _orig_jump_press = Spaz.on_jump_press
+        _orig_punch_press = Spaz.on_punch_press
+        _orig_bomb_press = Spaz.on_bomb_press
+        _orig_pickup_press = Spaz.on_pickup_press
 
         Spaz.__init__ = _patched_init
         Spaz.handlemessage = _patched_handlemessage
@@ -1313,3 +1830,8 @@ class BoostersPlugin(babase.Plugin):
         Bomb._handle_impact = _patched_bomb_handle_impact
         Bomb.handlemessage = _patched_bomb_handlemessage
         Spaz.set_land_mine_count = _patched_set_land_mine_count
+        Spaz.curse_explode = _patched_curse_explode
+        Spaz.on_jump_press = _qte_press('jump', '_orig_jump_press')
+        Spaz.on_punch_press = _qte_press('punch', '_orig_punch_press')
+        Spaz.on_bomb_press = _qte_press('bomb', '_orig_bomb_press')
+        Spaz.on_pickup_press = _qte_press('pickup', '_orig_pickup_press')
