@@ -72,7 +72,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.9'
+BSM_VERSION = '2.10'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -252,6 +252,27 @@ def _team(spaz: Spaz) -> Any:
         player = spaz.getplayer(bs.Player)
         return player.team if player else None
     return 'bots'
+
+
+def _look_dir(spaz: Spaz) -> tuple[float, float, float]:
+    """Where the fighter is looking. Level on normal maps; on Happy Thoughts
+    it also tilts up/down with the way they fly."""
+    node = spaz.node
+    # The game's position_forward point sits behind the body, so 'forward'
+    # is from it toward the body.
+    flat, flen = _norm((node.position[0] - node.position_forward[0], 0.0,
+                        node.position[2] - node.position_forward[2]))
+    if flen < 1e-4:
+        flat = (1.0, 0.0, 0.0)
+    if not getattr(spaz, 'fly', False):
+        return flat
+    vel = node.velocity
+    _, speed = _norm(vel)
+    if speed < 1.0:
+        return flat
+    pitch = max(-0.9, min(0.9, vel[1] / speed))
+    level = math.sqrt(1.0 - pitch * pitch)
+    return (flat[0] * level, pitch, flat[2] * level)
 
 
 def _is_enemy(spaz: Spaz, other: Spaz) -> bool:
@@ -537,12 +558,9 @@ def _fire_shot(spaz: Spaz) -> None:
     spaz._bst_shots -= 1
     _update_counter(spaz)
 
-    facing, flen = _norm((node.position_forward[0] - node.position[0], 0.0,
-                          node.position_forward[2] - node.position[2]))
-    if flen < 1e-4:
-        facing = (1.0, 0.0, 0.0)
+    facing = _look_dir(spaz)
     center = node.position_center
-    start = (center[0] + facing[0] * 0.8, center[1] + 0.2,
+    start = (center[0] + facing[0] * 0.8, center[1] + 0.2 + facing[1] * 0.8,
              center[2] + facing[2] * 0.8)
     vel = tuple(c * SHOT_SPEED for c in facing)
     shot = Bomb(
@@ -843,6 +861,7 @@ def _wrap_into_whip(spaz: Spaz, bomb: Bomb) -> None:
 
 def _whip_target(spaz: Spaz, facing: Sequence[float]) -> bs.Node | None:
     """Closest enemy in front (horizontal cone, any height)."""
+    facing, _ = _norm((facing[0], 0.0, facing[2]))
     origin = spaz.node.position_center
     min_cos = math.cos(math.radians(WHIP_ANGLE))
     best: bs.Node | None = None
@@ -875,10 +894,7 @@ def _fire_whip(spaz: Spaz) -> None:
     _update_counter(spaz)
     spaz._bst_whip_active = True
 
-    facing, flen = _norm((node.position_forward[0] - node.position[0], 0.0,
-                          node.position_forward[2] - node.position[2]))
-    if flen < 1e-4:
-        facing = (1.0, 0.0, 0.0)
+    facing = _look_dir(spaz)
 
     def _base() -> tuple:
         pos = node.position_center
