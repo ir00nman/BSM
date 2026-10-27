@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.5'
+BSM_VERSION = '2.6'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -325,9 +325,8 @@ def _activate_shield(spaz: Spaz) -> None:
     _flash(pos, hot, 0.9, 1.0, 1.4, duration=SHIELD_TIME)
     _ring(node.position, col, 3.2, 0.3, owner=node)
     _sparks(pos, 12, spread=0.4, scale=0.6)
-    # Whoosh + energy hum rising, a tiny glint on top.
-    _seq(pos, (0, 'swip2', 0.7), (0, 'shield_up', 0.9), (0.03, 'laser', 0.25),
-         (0.07, 'ding_small_high', 0.25))
+    _snd('shield_up', 0.9, pos)
+    _snd('swip2', 0.8, pos)
 
     spaz._ab_shield_timer = bs.Timer(
         SHIELD_TIME, _wcall(_end_shield, spaz)
@@ -358,8 +357,7 @@ def _end_shield(spaz: Spaz) -> None:
         _add_charge(spaz, spaz._ab_absorbed)
     else:
         # Miss: shield fizzles quietly.
-        _seq(node.position, (0, 'shield_down', 0.4),
-             (0.05, 'laser_reverse', 0.2))
+        _snd('shield_down', 0.35, node.position)
 
 
 def _calc_damage(spaz: Spaz, msg: bs.HitMessage) -> float:
@@ -452,15 +450,12 @@ def _absorb_hit(spaz: Spaz, msg: bs.HitMessage) -> None:
     _ring(node.position, hot, 4.0, 0.35, owner=node)
     _sparks(hitpos, min(40, 12 + int(damage * 0.03)), spread=0.8, scale=0.9)
     _shake(0.6)
-    _seq(hitpos, (0, 'block', 1.0), (0, 'shield_hit', 0.9))
-    if damage >= 300:
-        _seq(hitpos, (0, 'metal_hit', 0.6), (0.02, 'impact_hard', 0.5))
-    if damage >= 600:
-        _seq(hitpos, (0.03, 'gong', 0.35))
+    _snd('block', 1.0, hitpos)
+    _snd('shield_hit', 1.0, hitpos)
     if first:
-        # The "perfect parry" sting, ringing out.
-        _seq(hitpos, (0, 'orchestra_hit', 0.8), (0.05, 'ding_small_high', 0.7),
-             (0.12, 'bell_high', 0.5))
+        # The "perfect parry" sting.
+        _snd('orchestra_hit', 0.9, hitpos)
+        _snd('ding_small_high', 0.8, hitpos)
         _popup_text('БЛОК!', node.position, hot, big=True)
 
 
@@ -471,10 +466,8 @@ def _add_charge(spaz: Spaz, amount: float) -> None:
     spaz._ab_stored = min(MAX_STORED, spaz._ab_stored + amount)
     node = spaz.node
     col = _color(spaz)
-    # Charged: a rising bell arpeggio over the power-up.
-    _seq(node.position, (0, 'powerup01', 0.7), (0.04, 'laser', 0.3),
-         (0, 'bell_low', 0.5), (0.08, 'bell_med', 0.5),
-         (0.16, 'bell_high', 0.6))
+    _snd('powerup01', 0.9, node.position)
+    _snd('laser', 0.5, node.position)
     _flash(node.position_center, _bright(col, 1.5), 1.2, 1.2, 1.5, 0.4)
     _start_glow(spaz)
     spaz._ab_charge_timer = bs.Timer(
@@ -591,8 +584,7 @@ def _charge_expired(spaz: Spaz) -> None:
     _take_charge(spaz)
     node = spaz.node
     if node:
-        _seq(node.position, (0, 'shield_down', 0.8),
-             (0, 'laser_reverse', 0.5), (0.1, 'bell_low', 0.3))
+        _snd('shield_down', 0.8, node.position)
         _sparks(node.position_center, 20, spread=0.5, scale=0.7)
 
 
@@ -977,8 +969,8 @@ def _power_up_bomb(spaz: Spaz, bomb: Bomb) -> None:
         trail.append(bs.Timer(0.08, _trail, repeat=True))
 
     _flash(bomb.node.position, hot, 0.6, 1.0, 1.5, 0.3)
-    _seq(bomb.node.position, (0, 'powerup01', 0.8),
-         (0, 'laser_reverse', 0.6), (0.1, 'bell_med', 0.4))
+    _snd('powerup01', 0.9, bomb.node.position)
+    _snd('laser_reverse', 0.7, bomb.node.position)
 
     def _on_explode(bmb: Bomb, blast: Blast) -> None:
         trail.clear()
