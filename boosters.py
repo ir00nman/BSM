@@ -7,9 +7,15 @@
 заряжен, когда доставал её).
 
 Ударная бомба (взрыв при касании), заряжен:
-  удар кулаком по своей ударной бомбе — она уносится во врагов (доворачивает
-  за противником в направлении удара, до 45°) и взрывается от касания,
-  заряд уходит в её взрыв.
+  * брошенная заряженная ударная бомба летит и взрывается как обычно,
+    только её взрыв несёт заряд;
+  * удар кулаком по своей ударной бомбе (например, в воздухе сразу после
+    броска) — она уносится во врага
+    (доворачивает за противником в направлении удара, до 45°), по дороге
+    не взрывается о стены и пол и обходит препятствия — вверх, вниз или в
+    сторону, так что долетает и на «Счастливых мыслях»; взрывается при
+    касании врага, заряд уходит в её взрыв. Если впереди никого нет — летит
+    прямо и взрывается обо что угодно.
 
 Ледяная бомба, заряжен:
   * удар кулаком по своей ледяной бомбе — бомба рассыпается льдом, а боец
@@ -44,7 +50,8 @@ if TYPE_CHECKING:
 
 # ------------------------------- Настройки --------------------------------
 
-IMPACT_SPEED = 26.0  # Скорость ударной бомбы после удара (м/с).
+IMPACT_SPEED = 22.0  # Скорость ударной бомбы после удара (м/с).
+IMPACT_FLIGHT_TIME = 4.0  # Сколько она ищет путь к врагу, потом взрывается.
 IMPACT_RANGE = 25.0  # Дальность поиска врага для неё (метров).
 IMPACT_ANGLE = 45.0  # Насколько враг может быть в стороне от удара (градусов).
 ICE_FISTS_TIME = 8.0  # Ледяные кулаки: базовая длительность (сек)...
@@ -64,6 +71,7 @@ _ICE = (0.45, 0.8, 1.6)
 _orig_init: Any = None
 _orig_handlemessage: Any = None
 _orig_drop_bomb: Any = None
+_orig_bomb_handle_impact: Any = None
 
 
 # ------------------------------- Helpers ----------------------------------
@@ -248,6 +256,19 @@ def _find_target(spaz: Spaz, origin: Sequence[float],
     return best
 
 
+def _avoid_dirs(want: Sequence[float]) -> list[tuple[float, float, float]]:
+    """Ways around an obstacle: over, under or past it on either side."""
+    side, slen = _norm((-want[2], 0.0, want[0]))  # Horizontal perpendicular.
+    if slen < 1e-4:
+        side = (1.0, 0.0, 0.0)
+    out = []
+    for vert, horiz in ((1, 1), (1, -1), (0, 1), (0, -1), (-1, 1), (-1, -1)):
+        vec = [want[i] * 0.25 + side[i] * 0.8 * horiz for i in range(3)]
+        vec[1] += 0.9 * vert
+        out.append(_norm(vec)[0])
+    return out
+
+
 def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
     """Charged punch on our impact bomb: it streaks into the enemy."""
     node = spaz.node
@@ -261,9 +282,13 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
                                                     node.position)])
     target = _find_target(spaz, bnode.position, direction)
     if target is None:
-        # Nobody ahead: fly straight, a touch upward so it clears the floor.
+        # Nobody ahead: a plain shot, goes off on whatever it hits.
         direction, _ = _norm((direction[0], max(direction[1], 0.08),
                               direction[2]))
+        bomb._bst_levitate = False  # type: ignore[attr-defined]
+    else:
+        # Homing: walls and floors don't set it off on the way.
+        bomb._bst_levitate = True  # type: ignore[attr-defined]
 
     # Ours: no blowing up on our own fist; make sure it goes off on contact.
     bomb.owner = node
@@ -290,23 +315,41 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
     if target is not None:
         _snd('activate_beep', 0.8, target.position)
 
-    state = {'time': 0.0, 'dir': direction}
+    state: dict[str, Any] = {
+        'time': 0.0,
+        'dir': direction,
+        'last': bnode.position,
+        'slow': 0,
+        'avoid_until': 0.0,
+        'avoid_dir': direction,
+        'attempt': 0,
+    }
 
     def _stop() -> None:
         bomb._bst_flight = None  # type: ignore[attr-defined]
 
     def _step() -> None:
         state['time'] += _TICK
+        tnow = state['time']
         if not bnode or getattr(bomb, '_exploded', False):
             _stop()
             return
-        if state['time'] > 2.0:
-            _stop()  # Let physics take over.
-            return
         bpos = bnode.position
-        victim = target.getdelegate(Spaz) if target else None
-        if victim is not None and victim.is_alive():
-            state['dir'], dist = _norm(
+
+        if target is None:
+            if tnow > 2.0:
+                _stop()  # Let physics take over.
+                return
+            fdir = state['dir']
+        else:
+            victim = target.getdelegate(Spaz) if target else None
+            if victim is None or not victim.is_alive() or (
+                tnow > IMPACT_FLIGHT_TIME
+            ):
+                _stop()
+                bomb.handlemessage(ExplodeMessage())
+                return
+            want, dist = _norm(
                 [a - b for a, b in zip(target.position_center, bpos)]
             )
             if dist < 0.9 + IMPACT_SPEED * _TICK:
@@ -314,7 +357,25 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
                 _snd('big_impact', 1.0, bpos)
                 bomb.handlemessage(ExplodeMessage())  # Goes off on contact.
                 return
-        fdir = state['dir']
+
+            # Stuck against something (barely moving, or bumped it)? Try
+            # going over, under or around it, a different way each time.
+            _, moved = _norm([a - b for a, b in zip(bpos, state['last'])])
+            bumped = bs.time() - getattr(bomb, '_bst_bump_time', -9.0) < 0.1
+            if tnow > 0.1 and (moved < IMPACT_SPEED * _TICK * 0.35 or bumped):
+                state['slow'] += 1
+            else:
+                state['slow'] = 0
+            if state['slow'] >= 2 and tnow >= state['avoid_until']:
+                dirs = _avoid_dirs(want)
+                state['avoid_dir'] = dirs[state['attempt'] % len(dirs)]
+                state['attempt'] += 1
+                state['avoid_until'] = tnow + 0.18
+                state['slow'] = 0
+            fdir = state['avoid_dir'] if tnow < state['avoid_until'] else want
+            state['dir'] = fdir
+
+        state['last'] = bpos
         bnode.velocity = tuple(c * IMPACT_SPEED for c in fdir)
         bs.emitfx(position=bpos, velocity=tuple(-c * 2.0 for c in fdir),
                   count=3, scale=0.6, spread=0.1, chunk_type='spark')
@@ -518,6 +579,20 @@ def _patched_drop_bomb(self: Spaz) -> Bomb | None:
     return bomb
 
 
+def _patched_bomb_handle_impact(self: Bomb) -> None:
+    if getattr(self, '_bst_levitate', False):
+        # Homing after our punch: only a fighter (not its owner) sets it
+        # off; walls and floors are just obstacles to fly around.
+        try:
+            node = bs.getcollision().opposingnode
+        except bs.NotFoundError:
+            return
+        if not node or node.getnodetype() != 'spaz' or node == self.owner:
+            self._bst_bump_time = bs.time()  # type: ignore[attr-defined]
+            return
+    _orig_bomb_handle_impact(self)
+
+
 # ba_meta export babase.Plugin
 class BoostersPlugin(babase.Plugin):
     """Impact and ice bomb add-ons."""
@@ -530,10 +605,13 @@ class BoostersPlugin(babase.Plugin):
         Spaz._bst_patched = True  # type: ignore[attr-defined]
 
         global _orig_init, _orig_handlemessage, _orig_drop_bomb
+        global _orig_bomb_handle_impact
         _orig_init = Spaz.__init__
         _orig_handlemessage = Spaz.handlemessage
         _orig_drop_bomb = Spaz.drop_bomb
+        _orig_bomb_handle_impact = Bomb._handle_impact
 
         Spaz.__init__ = _patched_init
         Spaz.handlemessage = _patched_handlemessage
         Spaz.drop_bomb = _patched_drop_bomb
+        Bomb._handle_impact = _patched_bomb_handle_impact
