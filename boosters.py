@@ -28,16 +28,20 @@
   небольшим аккуратным взрывом.
 
 Мина, заряжен:
-  заряженная мина, взведясь, разбрасывает вокруг себя ещё 6 мин; они ложатся
-  по рельефу, а те, что свалились с обрыва или в пропасть, исчезают — так
-  что сколько их останется и где, зависит от местности.
+  * заряженная мина, взведясь, разбрасывает вокруг себя до 6 мин так, чтобы
+    взрыв одной не задевал соседей; они ложатся по рельефу, а свалившиеся с
+    обрыва или в пропасть исчезают — сколько останется и где, решает
+    местность;
+  * пнёшь свою заряженную мину, пока она не взвелась, — она минирует втрое
+    большую площадь втрое большим числом мин, уже не заботясь о том, что
+    взрыв одной потянет соседей (цепная реакция).
 
 Ядерный суицид (нужен Absorb Shield):
   подобрал проклятие («суицид») и спарировал щитом его взрыв — открывается
   QTE на 3 секунды: по одной показываются 4 кнопки, жми их по порядку.
-  Успел без ошибок — тревога, отсчёт, на последней секунде замедление и
-  наезд камеры, и боец взрывается ядерной бомбой, унося с собой всех на
-  карте. Ошибся или не успел — обычный взрыв проклятия.
+  Успел без ошибок — тревога и таймер до взрыва, в самый последний момент
+  замедление и наезд камеры, и боец взрывается ядерной бомбой, унося с
+  собой всех на карте. Ошибся или не успел — обычный взрыв проклятия.
 
 Ледяная бомба, заряжен:
   * удар кулаком по своей ледяной бомбе — бомба рассыпается льдом, а боец
@@ -89,7 +93,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.11'
+BSM_VERSION = '2.12'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -104,12 +108,16 @@ SHOT_SPEED = 20.0  # Скорость снаряда (м/с).
 SHOT_LIFETIME = 3.0  # Через сколько секунд снаряд взрывается сам.
 SHOT_DAMAGE = 500.0  # Урон снаряда (1000 = полное здоровье).
 SHOT_BLAST_RADIUS = 1.2  # Радиус небольшого взрыва снаряда (метров).
-MINE_SPREAD_COUNT = 6  # Сколько мин разбрасывает заряженная мина.
-MINE_SPREAD_MIN = 1.8  # Ближе этого мины не ложатся (метров)...
+MINE_SPREAD_COUNT = 6  # Сколько мин разбрасывает заряженная мина (не больше).
+MINE_SPREAD_MIN = 2.0  # Ближе этого мины не ложатся (метров)...
 MINE_SPREAD_MAX = 3.2  # ...и не дальше этого.
+MINE_SAFE_SPACING = 1.9  # Так далеко друг от друга, чтобы взрыв одной мины
+#                          (радиус 1.4 м) не задел соседку.
+MINE_KICK_SCALE = 3.0  # Пнутая мина: во столько раз больше площадь и мин.
 NUKE_QTE_TIME = 3.0  # Время на QTE ядерного суицида (сек).
 NUKE_QTE_KEYS = 4  # Сколько кнопок нужно нажать.
 NUKE_COUNTDOWN = 3.0  # Отсчёт до ядерного взрыва после QTE (сек).
+NUKE_SLOWMO = 0.35  # Замедление и наезд камеры: столько секунд до взрыва.
 IMPACT_RANGE = 25.0  # Дальность поиска врага для неё (метров).
 IMPACT_ANGLE = 45.0  # Насколько враг может быть в стороне от удара (градусов).
 ICE_FISTS_TIME = 8.0  # Ледяные кулаки: базовая длительность (сек)...
@@ -671,22 +679,61 @@ def _fire_shot(spaz: Spaz) -> None:
     _snd('cork_pop', 0.6, start)
 
 
-def _spread_mines(mine: Bomb) -> None:
-    """A charged mine, once armed, tosses more mines around itself. They
-    settle wherever the ground takes them; any that drop off a ledge or
-    into the void are scrapped - so terrain decides how many and where."""
+def _mine_spots(big: bool) -> list[tuple[float, float]]:
+    """(angle, distance) for the scattered mines.
+
+    Normal: up to MINE_SPREAD_COUNT, each out of every other's blast radius
+    (and the center mine's), as many as fit. Kicked: triple the area and the
+    count, no spacing - neighbors may set each other off."""
+    if big:
+        far = MINE_SPREAD_MAX * math.sqrt(MINE_KICK_SCALE)
+        spots = []
+        for _ in range(int(MINE_SPREAD_COUNT * MINE_KICK_SCALE)):
+            # Uniform over the ring's area, not bunched at the middle.
+            dist = math.sqrt(random.uniform(MINE_SPREAD_MIN ** 2, far ** 2))
+            spots.append((random.uniform(0.0, 2.0 * math.pi), dist))
+        return spots
+    placed: list[tuple[float, float]] = []
+    points: list[tuple[float, float]] = [(0.0, 0.0)]  # The center mine.
+    for _ in range(80):
+        if len(placed) >= MINE_SPREAD_COUNT:
+            break
+        ang = random.uniform(0.0, 2.0 * math.pi)
+        dist = random.uniform(MINE_SPREAD_MIN, MINE_SPREAD_MAX)
+        x, z = math.cos(ang) * dist, math.sin(ang) * dist
+        if all(math.hypot(x - px, z - pz) >= MINE_SAFE_SPACING
+               for px, pz in points):
+            placed.append((ang, dist))
+            points.append((x, z))
+    return placed
+
+
+def _kick_mine(spaz: Spaz, mine: Bomb) -> None:
+    """Kicked our charged mine before it armed: mine a much bigger area."""
+    mine._bst_mine_spread = False  # type: ignore[attr-defined]
+    pos = mine.node.position
+    mine.node.velocity = (0.0, 3.0, 0.0)  # A little hop.
+    bs.emitfx(position=pos, velocity=(0, 4, 0), count=20, scale=0.7,
+              spread=0.4, chunk_type='spark')
+    _snd('punch_strong01', 1.0, pos)
+    _snd('metal_hit', 0.8, pos)
+    _spread_mines(mine, big=True)
+
+
+def _spread_mines(mine: Bomb, big: bool = False) -> None:
+    """A charged mine tosses more mines around itself. They settle wherever
+    the ground takes them; any that drop off a ledge or into the void are
+    scrapped - so terrain decides how many stay and where."""
     if not mine.node:
         return
     pos = mine.node.position
     source = mine.get_source_player(bs.Player)
     owner = mine.owner
     flight = 0.55
-    base = random.uniform(0.0, 2.0 * math.pi)
     tossed = []
-    for i in range(MINE_SPREAD_COUNT):
-        ang = (base + 2.0 * math.pi * i / MINE_SPREAD_COUNT
-               + random.uniform(-0.25, 0.25))
-        dist = random.uniform(MINE_SPREAD_MIN, MINE_SPREAD_MAX)
+    spots = _mine_spots(big)
+    far = max(dist for _, dist in spots) if spots else MINE_SPREAD_MAX
+    for ang, dist in spots:
         speed = dist / flight
         extra = Bomb(
             position=(pos[0], pos[1] + 0.5, pos[2]),
@@ -696,10 +743,12 @@ def _spread_mines(mine: Bomb) -> None:
             owner=owner,
         ).autoretain()
         tossed.append(extra)
-    bs.emitfx(position=pos, velocity=(0, 3, 0), count=12, scale=0.6,
-              spread=0.4, chunk_type='metal')
+    bs.emitfx(position=pos, velocity=(0, 3, 0), count=12 if not big else 30,
+              scale=0.6, spread=0.4, chunk_type='metal')
     _snd('cork_pop', 1.0, pos)
     _snd('bomb_drop01', 0.8, pos)
+    if big:
+        _snd('bomb_drop02', 0.8, pos)
 
     def _settle() -> None:
         for extra in tossed:
@@ -707,8 +756,7 @@ def _spread_mines(mine: Bomb) -> None:
                 continue
             epos = extra.node.position
             fell = epos[1] < pos[1] - 1.2
-            slid = math.hypot(epos[0] - pos[0], epos[2] - pos[2]) > (
-                MINE_SPREAD_MAX + 1.5)
+            slid = math.hypot(epos[0] - pos[0], epos[2] - pos[2]) > far + 1.5
             if fell or slid:
                 # Off the edge: no place for a mine here.
                 bs.emitfx(position=epos, velocity=(0, 1, 0), count=6,
@@ -1260,7 +1308,8 @@ def _start_nuke(spaz: Spaz) -> None:
         'focus': {},
     }
     text = _screen_text('ЯДЕРНЫЙ ЗАРЯД', (0, 150), (1.0, 0.25, 0.15), 1.8)
-    count = _screen_text('3', (0, 80), (1.0, 1.0, 1.0), 2.2)
+    count = _screen_text(f'{NUKE_COUNTDOWN:.1f}', (0, 80), (1.0, 1.0, 1.0),
+                         2.2)
     light = bs.newnode(
         'light',
         owner=node,
@@ -1271,8 +1320,9 @@ def _start_nuke(spaz: Spaz) -> None:
     bs.animate(light, 'intensity', {0: 0.5, 0.25: 2.0, 0.5: 0.5}, loop=True)
     bs.animate(light, 'radius', {0: 0.3, NUKE_COUNTDOWN: 1.4})
     _seq(node.position, (0, 'alarm', 1.0), (0, 'announce_three', 1.0),
-         (1.0, 'announce_two', 1.0), (2.0, 'announce_one', 1.0),
-         (2.0, 'laser', 0.8))
+         (NUKE_COUNTDOWN - 2.0, 'announce_two', 1.0),
+         (NUKE_COUNTDOWN - 1.0, 'announce_one', 1.0),
+         (NUKE_COUNTDOWN - 1.0, 'laser', 0.8))
     state = {'time': 0.0}
 
     def _tick() -> None:
@@ -1287,7 +1337,8 @@ def _start_nuke(spaz: Spaz) -> None:
             count.delete()
             spaz._bst_qte = None
             return
-        count.text = str(max(1, int(math.ceil(NUKE_COUNTDOWN - tnow))))
+        # Exact time to the blast (game time, so slow-mo slows it too).
+        count.text = f'{max(0.0, NUKE_COUNTDOWN - tnow):.1f}'
         # The world goes red as it builds.
         red = min(1.0, tnow / NUKE_COUNTDOWN)
         orig = saved['tint']
@@ -1303,7 +1354,7 @@ def _start_nuke(spaz: Spaz) -> None:
                   count=3, scale=0.7, spread=0.05, chunk_type='spark')
         if int(tnow * 20) % 5 == 0:
             _snd('tick', 0.7, pos)
-        if tnow >= NUKE_COUNTDOWN - 1.0 and not saved.get('zoomed'):
+        if tnow >= NUKE_COUNTDOWN - NUKE_SLOWMO and not saved.get('zoomed'):
             saved['zoomed'] = True
             _nuke_close_up(gnode, node, saved)
         if tnow >= NUKE_COUNTDOWN:
@@ -1321,7 +1372,7 @@ _NUKE_TIMERS: list[list] = []
 
 
 def _nuke_close_up(gnode: bs.Node, node: bs.Node, saved: dict) -> None:
-    """The last second: slow motion and the camera closing in on them."""
+    """The very last moment: slow motion and the camera closing in."""
     try:
         gnode.slow_motion = True
     except Exception:
@@ -1651,6 +1702,17 @@ def _patched_handlemessage(self: Spaz, msg: Any) -> Any:
         ):
             self._punched_nodes.add(hit)
             _deflect_homing(self, bomb)
+            return None
+
+        # Kicking our own charged mine (before it arms): the big minefield.
+        if (
+            bomb is not None
+            and bomb.bomb_type == 'land_mine'
+            and getattr(bomb, '_bst_mine_spread', False)
+            and _is_own_bomb(self, bomb)
+        ):
+            self._punched_nodes.add(hit)
+            _kick_mine(self, bomb)
             return None
 
         # Charged punch on our own flying normal bomb: mini shells.
