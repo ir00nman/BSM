@@ -60,6 +60,7 @@ ICE_FISTS_MAX_TIME = 20.0  # ...но не дольше этого.
 ICE_FISTS_FREEZE = 3.0  # На сколько секунд замораживает удар ледяным кулаком.
 ICE_MINI_BOMBS = 3  # Сколько мини-бомб разбрасывает заряженная ледяная.
 FX_STRENGTH = 0.5  # Сила вспышек, света и тряски камеры (1.0 = максимум).
+FLASH_STRENGTH = 0.4  # Яркость и размер вспышек (1.0 = как в версии 1.5).
 
 # --------------------------------------------------------------------------
 
@@ -118,9 +119,11 @@ def _color(spaz: Spaz) -> tuple:
 def _flash(pos: Sequence[float], color: Sequence[float], size: float,
            light_radius: float, intensity: float,
            duration: float = 0.25) -> None:
+    dim = FX_STRENGTH * FLASH_STRENGTH
+    color = _bright(color, 1.0)  # Same hue, never over-bright.
     flash = bs.newnode(
         'flash',
-        attrs={'position': pos, 'size': size * FX_STRENGTH, 'color': color},
+        attrs={'position': pos, 'size': size * dim, 'color': color},
     )
     bs.timer(0.08, flash.delete)
     light = bs.newnode(
@@ -128,12 +131,12 @@ def _flash(pos: Sequence[float], color: Sequence[float], size: float,
         attrs={
             'position': pos,
             'color': color,
-            'radius': light_radius * FX_STRENGTH,
+            'radius': light_radius * dim,
             'height_attenuated': False,
             'volume_intensity_scale': 0.6,
         },
     )
-    bs.animate(light, 'intensity', {0: intensity * FX_STRENGTH, duration: 0})
+    bs.animate(light, 'intensity', {0: intensity * dim, duration: 0})
     bs.timer(duration + 0.05, light.delete)
 
 

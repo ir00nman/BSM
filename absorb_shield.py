@@ -59,6 +59,7 @@ BOMB_RADIUS_MULT = 1.6  # Радиус бонусного взрыва отно�
 PLAYERS_ONLY = True  # Только игроки (боты щит не используют).
 SHOW_HINT = True  # Подсказка про щит в начале каждой игры.
 FX_STRENGTH = 0.5  # Сила вспышек, света и тряски камеры (1.0 = максимум).
+FLASH_STRENGTH = 0.4  # Яркость и размер вспышек (1.0 = как в версии 1.5).
 FROST_RADIUS_MULT = 1.7  # Радиус морозной волны: во столько раз больше
 #                          радиуса взрыва заряженной ледяной бомбы.
 FROST_TIME = 5.0  # Сколько секунд держится заморозка от волны.
@@ -129,9 +130,10 @@ def _flash(
     duration: float = 0.25,
 ) -> None:
     """A colored flash + light burst at a point."""
-    size *= FX_STRENGTH
-    light_radius *= FX_STRENGTH
-    intensity *= FX_STRENGTH
+    size *= FX_STRENGTH * FLASH_STRENGTH
+    light_radius *= FX_STRENGTH * FLASH_STRENGTH
+    intensity *= FX_STRENGTH * FLASH_STRENGTH
+    color = _bright(color, 1.0)  # Same hue, never over-bright.
     flash = bs.newnode(
         'flash', attrs={'position': pos, 'size': size, 'color': color}
     )
@@ -747,7 +749,8 @@ def _frost_wave(pos: Sequence[float], owner: bs.Node | None,
     bs.animate(
         light,
         'intensity',
-        {0: 3.0 * FX_STRENGTH, duration: 1.2 * FX_STRENGTH, duration + 0.6: 0},
+        {0: 3.0 * FX_STRENGTH * FLASH_STRENGTH,
+         duration: 1.2 * FX_STRENGTH * FLASH_STRENGTH, duration + 0.6: 0},
     )
     bs.timer(duration + 0.7, light.delete)
 
@@ -861,11 +864,13 @@ def _power_up_bomb(spaz: Spaz, bomb: Bomb) -> None:
     trail: list[bs.Timer] = []
     if bomb.bomb_type == 'land_mine':
         # A mine can lie around for ages: just a faint glow, no sparks.
-        bs.animate(light, 'intensity', {0: 0.2, 0.6: 0.6, 1.2: 0.2},
-                   loop=True)
+        bs.animate(light, 'intensity',
+                   {0: 0.2 * FLASH_STRENGTH, 0.6: 0.6 * FLASH_STRENGTH,
+                    1.2: 0.2 * FLASH_STRENGTH}, loop=True)
     else:
-        bs.animate(light, 'intensity', {0: 0.8, 0.15: 2.2, 0.3: 0.8},
-                   loop=True)
+        bs.animate(light, 'intensity',
+                   {0: 0.8 * FLASH_STRENGTH, 0.15: 2.2 * FLASH_STRENGTH,
+                    0.3: 0.8 * FLASH_STRENGTH}, loop=True)
         trail.append(bs.Timer(0.08, _trail, repeat=True))
 
     _flash(bomb.node.position, hot, 0.6, 1.0, 1.5, 0.3)
