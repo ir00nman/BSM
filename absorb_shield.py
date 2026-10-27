@@ -640,23 +640,48 @@ def _release_punch_fx(spaz: Spaz, amount: float,
     # Only a soft colored glint (no blinding flashes).
     _flash(center, _bright(col, 1.2), 0.4, 0.8, 1.0, 0.15)
 
-    # Shot through: a dense stream from the fist, through the body and
-    # out of the back.
-    for along, speed in ((0.0, 42.0), (0.5, 51.0), (1.0, 60.0)):
-        start = (ppos[0] + (center[0] - ppos[0]) * along + fwd[0] * along * 0.5,
-                 ppos[1] + (center[1] - ppos[1]) * along + fwd[1] * along * 0.5,
-                 ppos[2] + (center[2] - ppos[2]) * along + fwd[2] * along * 0.5)
-        bs.emitfx(position=start,
-                  velocity=(fwd[0] * speed, fwd[1] * speed + 0.5,
-                            fwd[2] * speed),
-                  count=int(25 * power), scale=0.7, spread=0.08,
-                  chunk_type='spark')
-    exit_pos = (center[0] + fwd[0] * 0.6, center[1] + fwd[1] * 0.6,
-                center[2] + fwd[2] * 0.6)
-    bs.emitfx(position=exit_pos,
-              velocity=(fwd[0] * 30.0, fwd[1] * 30.0 + 0.5, fwd[2] * 30.0),
-              count=int(20 * power), scale=0.8, spread=0.12,
+    # Sparks (the v1.4 look, ~2.5x denser), flashes stay dimmed.
+    fx, fy, fz = fwd
+    # Shock bubbles chasing the fist forward: the "barrier" breaking.
+    for i in range(3):
+        step = 0.3 + 0.3 * i
+        bs.timer(
+            0.025 * i,
+            bs.CallStrict(
+                bs.emitfx,
+                position=(ppos[0] + fx * step, ppos[1] + fy * step,
+                          ppos[2] + fz * step),
+                emit_type='distortion',
+                spread=(0.6 + 0.4 * i) * FX_STRENGTH * power,
+            ),
+        )
+    # Vapor cone thrown forward and out.
+    bs.emitfx(position=ppos, velocity=(fx * 9.0, fy * 9.0 + 1.0, fz * 9.0),
+              count=int(60 * power), scale=0.7, spread=0.45,
               chunk_type='sweat')
+    bs.emitfx(position=ppos, velocity=(fx * 4.0, fy * 4.0, fz * 4.0),
+              count=3, emit_type='tendrils', tendril_type='thin_smoke')
+    # Sparks streaking ahead of the punch.
+    bs.emitfx(position=ppos,
+              velocity=(fx * 14.0, fy * 14.0 + 1.0, fz * 14.0),
+              count=int(75 * power), scale=0.9, spread=0.15,
+              chunk_type='spark')
+    _sparks(ppos, int(40 * power), vel=(fx * 4.0, 3.0, fz * 4.0), spread=0.6,
+            scale=0.8)
+    # Burst at the fist...
+    _sparks(ppos, min(150, 50 + int(amount * 0.075)),
+            vel=(fx * 3.0, fy * 3.0 + 2.0, fz * 3.0), spread=0.5, scale=1.2)
+    # ...and out of the target's back.
+    exit_pos = (center[0] + fx * 0.5, center[1] + fy * 0.5,
+                center[2] + fz * 0.5)
+    bs.emitfx(position=exit_pos,
+              velocity=(fx * 12.0, fy * 12.0 + 1.5, fz * 12.0),
+              count=min(125, 40 + int(amount * 0.05)), scale=1.0,
+              spread=0.2, chunk_type='spark')
+    bs.emitfx(position=exit_pos,
+              velocity=(fx * 6.0, fy * 6.0 + 2.0, fz * 6.0),
+              count=min(75, 20 + int(amount * 0.04)), scale=0.8,
+              spread=0.3, chunk_type='sweat')
 
     # Shock ring perpendicular to the punch: two waves, one after another.
     up = (0.0, 1.0, 0.0)
