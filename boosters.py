@@ -70,8 +70,9 @@
 большое ровное поле в игре): мяч подаётся из центра и летит по кругу, его
 отбивают кулаком; пропустил — минус жизнь. Мяч летит низко, уходит туда,
 куда ударили, и мягкой дугой доворачивает к следующему. «Схватить», когда
-мяч рядом, — поймал: он тащит тебя к следующему; ещё раз — бросил. Боты четырёх уровней сложности,
-урона от ударов нет, бомб нет.
+мяч рядом, — поймал: он тащит тебя к следующему; ещё раз — бросил. Боты
+четырёх уровней сложности. Бомб нет, но можно драться кулаками и хватать
+соперников (забили — минус жизнь).
 
 Работает и на «Счастливых мыслях»: направления и расстояния считаются в 3D.
 Мод нужен только хосту: в сетевой игре всё считается на сервере.
@@ -106,7 +107,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.26'
+BSM_VERSION = '2.27'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -666,11 +667,27 @@ def _try_contact_deflect(bomb: Bomb, last: Sequence[float],
     since = bs.time() * 1000.0 - getattr(spaz, 'last_punch_time_ms', -9999)
     if since > DEFLECT_WINDOW * 1000.0:
         return False
+    if getattr(spaz, 'bsm_ball_incoming', None) is not None:
+        return False  # Ball-game bots decide for themselves.
     if getattr(spaz, 'fly', False):
         hit_t = _seg_hit_t(last, bpos, target.position_center,
                            FLY_DEFLECT_ZONE)
     else:
-        hit_t = _seg_hit_t(last, bpos, target.punch_position, FIST_RADIUS)
+        # Where the fist is: out in front of them. (The engine's own
+        # punch_position is gone - with a warning - once the punch ends.)
+        look = _look_dir(spaz)
+        center = target.position_center
+        fist = tuple(center[k] + look[k] * 0.55 for k in range(3))
+        hit_t = _seg_hit_t(last, bpos, fist, FIST_RADIUS)
+        if body_t is None:
+            body_t = _seg_hit_t(last, bpos, center, 0.7)
+        # Coming at them from the front while they punch: the fist is in
+        # its way, whatever the height it drops in at.
+        come, clen = _norm([a - b for a, b in zip(last, center)])
+        if (body_t is not None and clen > 1e-4
+                and sum(come[k] * look[k] for k in range(3)) > 0.5
+                and (hit_t is None or hit_t > body_t)):
+            hit_t = body_t
     # It has to meet the fist (or zone) before it meets the body.
     if hit_t is None or (body_t is not None and hit_t > body_t):
         return False
@@ -2689,12 +2706,12 @@ def _ice_burst(thrower: bs.Node | None, bomb: Bomb, blast: Blast) -> None:
 # ------------------------------ Ball game ---------------------------------
 
 # Bot levels: name, chance to return a slow ball, chance at top speed, how
-# briskly they move about.
+# briskly they move about, how often they swing at someone close by.
 _BOT_LEVELS = (
-    ('Лёгкие', 0.80, 0.30, 0.45),
-    ('Средние', 0.93, 0.60, 0.6),
-    ('Сложные', 0.98, 0.80, 0.75),
-    ('Безумные', 1.00, 0.95, 0.9),
+    ('Лёгкие', 0.80, 0.30, 0.45, 0.06),
+    ('Средние', 0.93, 0.60, 0.6, 0.1),
+    ('Сложные', 0.98, 0.80, 0.75, 0.15),
+    ('Безумные', 1.00, 0.95, 0.9, 0.2),
 )
 _BOT_NAMES = ('Вася', 'Маша', 'Кузя', 'Глаша', 'Боря', 'Дуся', 'Тоша',
               'Фрося', 'Гоша', 'Нюша', 'Сеня', 'Зина')
@@ -2750,15 +2767,6 @@ def _hearts(lives: int) -> str:
     return '♥' * max(0, lives)
 
 
-class _BallPlayerSpaz(PlayerSpaz):
-    """Punches and bumps don't hurt in the ball game: only the ball counts."""
-
-    def handlemessage(self, msg: Any) -> Any:
-        if isinstance(msg, bs.HitMessage):
-            return True
-        return super().handlemessage(msg)
-
-
 class _BallBot(Spaz):
     """A ball-game bot: strolls about its spot and, when the ball comes at
     it, tries to punch it on - how well depends on its level and the speed
@@ -2770,6 +2778,8 @@ class _BallBot(Spaz):
                          start_invincible=False, can_accept_powerups=False)
         self.bsm_team = object()  # Everyone's opponent.
         self.lives = lives
+        self.bsm_spec = (level, name, look, tuple(home))  # To come back as.
+        self.bsm_out = False  # Knocked out of the match by the game itself.
         self._level = _BOT_LEVELS[level]
         self._home = tuple(home)
         self._goal = tuple(home)
@@ -2783,8 +2793,12 @@ class _BallBot(Spaz):
                                      repeat=True)
 
     def handlemessage(self, msg: Any) -> Any:
-        if isinstance(msg, bs.HitMessage):
-            return True
+        if isinstance(msg, bs.DieMessage) and self.is_alive():
+            result = super().handlemessage(msg)
+            game = BallGame.current()
+            if game is not None and not self.bsm_out:
+                game.bsm_bot_down(self)  # Beaten up: costs a life.
+            return result
         return super().handlemessage(msg)
 
     def _move(self, vec: Sequence[float], speed: float) -> None:
@@ -2801,6 +2815,17 @@ class _BallBot(Spaz):
             # It's coming at us: face it, ready to swing.
             to, dist = _norm((ball[0] - pos[0], 0.0, ball[2] - pos[2]))
             self._move(to, 0.25 if dist > 3.0 else 0.0)
+            return
+        # Someone right up close: turn on them and have a swing.
+        foes = [n for n in _live_fighters() if n != node
+                and math.dist(n.position, pos) < 1.4]
+        if foes:
+            foe = min(foes, key=lambda n: math.dist(n.position, pos))
+            to, _ = _norm((foe.position[0] - pos[0], 0.0,
+                           foe.position[2] - pos[2]))
+            self._move(to, 0.3)
+            if random.random() < self._level[4]:
+                self._swing()
             return
         now = bs.time()
         if now > self._goal_time or math.dist(pos, self._goal) < 0.4:
@@ -2833,7 +2858,7 @@ class _BallBot(Spaz):
         if self._rolled == leg:
             return False
         self._rolled = leg
-        _, slow, fast, _ = self._level
+        slow, fast = self._level[1], self._level[2]
         frac = max(0.0, min(1.0, (speed - IMPACT_SPEED)
                             / (DEFLECT_MAX_SPEED - IMPACT_SPEED)))
         if random.random() >= slow + (fast - slow) * frac:
@@ -2846,8 +2871,6 @@ class _BallBot(Spaz):
 
 class _BallPlayer(bs.Player['_BallTeam']):
     """A player in the ball game."""
-
-    playerspaztype = _BallPlayerSpaz
 
     def __init__(self) -> None:
         self.lives = 0
@@ -3067,36 +3090,66 @@ class BallGame(bs.TeamGameActivity[_BallPlayer, _BallTeam]):
         node.handlemessage('knockout', 300.0)
         player = spaz.getplayer(_BallPlayer) if isinstance(
             spaz, PlayerSpaz) else None
+        lives = self._spend_life(spaz, player)
+        spaz.set_score_text(_hearts(lives) or 'ВЫБЫЛ', color=(1.0, 0.3, 0.3),
+                            flash=True)
+        if lives <= 0:
+            if isinstance(spaz, _BallBot):
+                spaz.bsm_out = True
+            bs.timer(0.8, _wcall(BallGame._knock_out, spaz))
+
+    def _spend_life(self, spaz: Spaz | None,
+                    player: _BallPlayer | None) -> int:
+        """One life off (ball missed or beaten up); lives left."""
         if player is not None:
             player.lives -= 1
             lives = player.lives
         else:
-            spaz.lives = getattr(spaz, 'lives', 1) - 1  # type: ignore[attr-defined]
+            spaz.lives = getattr(spaz, 'lives', 1) - 1  # type: ignore
             lives = spaz.lives  # type: ignore[attr-defined]
-        spaz.set_score_text(_hearts(lives) or 'ВЫБЫЛ', color=(1.0, 0.3, 0.3),
-                            flash=True)
-        _popup_text('-1 ♥', node.position, (1.0, 0.3, 0.3))
+        if spaz is not None and spaz.node:
+            _popup_text('-1 ♥', spaz.node.position, (1.0, 0.3, 0.3))
         if lives <= 0:
             self._out += 1
             if player is not None:
                 player.team.score = max(player.team.score, self._out)
-            bs.timer(0.8, _wcall(BallGame._knock_out, spaz))
             _snd('boo', 0.6)
         else:
             _snd('cheer', 0.4)
         self._update_scoreboard()
         bs.timer(1.0, bs.WeakCallStrict(self._check_end))
+        return lives
 
     @staticmethod
     def _knock_out(spaz: Spaz) -> None:
         if spaz.node and spaz.is_alive():
             spaz.handlemessage(bs.DieMessage())
 
+    def bsm_bot_down(self, bot: _BallBot) -> None:
+        """A bot was beaten up: a life off, back on its spot if it's got
+        any left."""
+        if self._ended or bot.lives <= 0:
+            return
+        if self._spend_life(bot, None) > 0:
+            bs.timer(2.0, _wcall(self._bot_back, bot))
+
+    def _bot_back(self, bot: _BallBot) -> None:
+        if self._ended or bot not in self._bots:
+            return
+        level, name, look, home = bot.bsm_spec
+        fresh = _BallBot(level, name, look, home, bot.lives)
+        fresh.set_score_text(_hearts(fresh.lives), color=(1.0, 0.3, 0.3))
+        self._bots[self._bots.index(bot)] = fresh
+
     def handlemessage(self, msg: Any) -> Any:
         if isinstance(msg, bs.PlayerDiedMessage):
             super().handlemessage(msg)
             player = msg.getplayer(_BallPlayer)
-            if player.lives > 0:
+            # Beaten up (the game's own knock-out leaves no lives): costs
+            # a life, then back in if any are left.
+            if (player.lives > 0 and not self._ended
+                    and self._spend_life(player.actor if isinstance(
+                        player.actor, Spaz) else None, player) > 0):
                 self.respawn_player(player)
             bs.timer(0.1, bs.WeakCallStrict(self._check_end))
             return None
@@ -3115,7 +3168,7 @@ class BallGame(bs.TeamGameActivity[_BallPlayer, _BallTeam]):
         if self._ended or not self.has_begun():
             return
         humans = [p for p in self.players if p.lives > 0]
-        bots = [b for b in self._bots if b.lives > 0 and b.node]
+        bots = [b for b in self._bots if b.lives > 0]  # (Or coming back.)
         teams = {p.team for p in humans}
         sides = len(teams) + len(bots)
         # Over when one side is left - or when every human is out.
