@@ -72,7 +72,8 @@
 большое ровное поле в игре): мяч подаётся из центра и летит по кругу, его
 отбивают кулаком; пропустил — минус жизнь. Мяч летит низко, уходит туда,
 куда ударили, и мягкой дугой доворачивает к следующему. «Схватить», когда
-мяч рядом, — поймал: он тащит тебя к следующему; ещё раз — бросил. Боты
+мяч рядом (любой, даже летящий в другого), — поймал: он тащит тебя к
+следующему; ещё раз — бросил. Боты
 четырёх уровней сложности. Бомб нет, но можно драться кулаками и хватать
 соперников (забили — минус жизнь).
 
@@ -109,7 +110,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.28'
+BSM_VERSION = '2.29'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -582,8 +583,10 @@ def _start_homing(bomb: Bomb, sender: bs.Node | None,
             ready = getattr(victim, 'bsm_ball_incoming', None)
             if ready is not None and ready(bomb, dist, speed):
                 return  # Knocked back.
-            if state.get('low') and _grab_ready(victim, bomb, dist):
-                _catch(victim, bomb)
+            grabber = _ball_grabber(bomb, state, bpos) if state.get(
+                'low') else None
+            if grabber is not None:
+                _catch(grabber, bomb)
                 return  # Caught: off it goes with them in tow.
             # It goes off when it physically touches them (see
             # _patched_bomb_handle_impact); this is only a backstop - which
@@ -1000,15 +1003,30 @@ def _grab_ready(spaz: Spaz, bomb: Bomb, dist: float) -> bool:
             and getattr(bomb, '_bst_flight', None) is not None)
 
 
+def _ball_grabber(bomb: Bomb, state: dict,
+                  bpos: Sequence[float]) -> Spaz | None:
+    """Anyone (not already riding it) who just pressed 'pick up' and has
+    the ball within reach."""
+    for node in _live_fighters():
+        if node == state.get('rider'):
+            continue
+        spaz = node.getdelegate(Spaz)
+        if spaz is not None and _grab_ready(
+                spaz, bomb, math.dist(bpos, node.position_center)):
+            return spaz
+    return None
+
+
 def _ball_grab_press(spaz: Spaz) -> None:
-    """'Pick up' in the ball game: catch the ball if it's at hand now (or
-    within a moment, see _step)."""
+    """'Pick up' in the ball game: grab the ball if it's at hand now -
+    anyone may, not just the one it's flying at (or within a moment, see
+    _step)."""
     spaz._bst_grab_time = bs.time()  # type: ignore[attr-defined]
     game = BallGame.current()
     ball = game._ball if game is not None else None
     state = getattr(ball, '_bst_homing', None)
     if (state is None or not ball.node or not spaz.node
-            or state.get('target') != spaz.node):
+            or state.get('rider') == spaz.node):
         return
     dist = math.dist(ball.node.position, spaz.node.position_center)
     if _grab_ready(spaz, ball, dist):
@@ -1016,8 +1034,8 @@ def _ball_grab_press(spaz: Spaz) -> None:
 
 
 def _catch(spaz: Spaz, bomb: Bomb) -> None:
-    """Ball game: the one it flew at caught it - it flies on to the next one
-    round, hauling them along to smash it into them."""
+    """Ball game: someone caught it - it flies on to the next one round
+    after them, hauling them along to smash it into them."""
     state = bomb._bst_homing  # type: ignore[attr-defined]
     node = spaz.node
     bnode = bomb.node
@@ -1026,6 +1044,7 @@ def _catch(spaz: Spaz, bomb: Bomb) -> None:
     onward = _next_in_round(state, node)
     if onward is None:
         return
+    _let_go(state, bomb)  # Snatched from whoever was riding it.
     if node.hold_node != bnode:
         spaz._pick_up(bnode)
     speed = state['speed']
@@ -3417,15 +3436,12 @@ def _patched_bomb_handlemessage(self: Bomb, msg: Any) -> Any:
         if isinstance(msg, bs.HitMessage):
             return None
         if isinstance(msg, bs.PickedUpMessage):
-            # Only the one it's flying at may catch it; anyone else lets go.
+            # Anyone may grab it: off it goes with them in tow.
             picker = msg.node
             homing = getattr(self, '_bst_homing', None) or {}
             spaz = picker.getdelegate(Spaz) if picker else None
             if spaz is not None and homing.get('rider') != picker:
-                if homing.get('target') == picker:
-                    _catch(spaz, self)
-                else:
-                    picker.hold_node = None
+                _catch(spaz, self)
             return None
         game = game_ref()
         if (isinstance(msg, ExplodeMessage) and game is not None
@@ -3465,6 +3481,12 @@ def _patched_bomb_handle_impact(self: Bomb) -> None:
             self._bst_bump_time = bs.time()  # type: ignore[attr-defined]
             return
         homing = getattr(self, '_bst_homing', None)
+        spaz = node.getdelegate(Spaz)
+        if (homing is not None and homing.get('low') and spaz is not None
+                and homing.get('rider') != node
+                and _grab_ready(spaz, self, 0.0)):
+            _catch(spaz, self)  # Bumped into someone grabbing for it.
+            return
         if homing is not None and node == homing.get('target'):
             here = self.node.position
             if _try_contact_deflect(self, homing.get('last', here), here):
