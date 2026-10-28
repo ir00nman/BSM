@@ -70,10 +70,10 @@
 
 Режим «Мячик» (в списке игр, карта «BSM Арена» — ночной стадион, самое
 большое ровное поле в игре): мяч подаётся из центра и летит по кругу, его
-отбивают кулаком; пропустил — минус жизнь. Мяч летит низко, уходит туда,
-куда ударили, и мягкой дугой доворачивает к следующему. «Схватить», когда
-мяч рядом (любой, даже летящий в другого), — поймал: он тащит тебя к
-следующему; ещё раз — бросил. Боты
+отбивают кулаком (только настоящее попадание кулака, отбить может любой);
+пропустил — минус жизнь. Мяч летит низко, уходит туда, куда ударили, и
+мягкой дугой доворачивает к следующему. Схватил мяч руками
+(обычное хватание) — он тащит тебя к следующему; ещё раз — бросил. Боты
 четырёх уровней сложности. Бомб нет, но можно драться кулаками и хватать
 соперников (забили — минус жизнь).
 
@@ -110,7 +110,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.29'
+BSM_VERSION = '2.30'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -176,7 +176,9 @@ BALL_SERVE_DELAY = 1.5  # Пауза перед подачей нового мя
 BALL_TURN = 1.5  # Как плавно мяч доворачивает к следующему (рад/с)...
 BALL_TURN_RADIUS = 7.0  # ...на скорости — дугой не круче такого радиуса (м).
 BALL_HIT_SPREAD = 45.0  # Боты отбивают с разбросом в сторону (градусов).
-BALL_CATCH_DIST = 1.6  # «Схватить», когда мяч ближе этого, — поймал (м).
+BALL_SWING_LEAD = 0.27  # Боты замахиваются за столько до встречи с мячом (с):
+#                        у удара есть замах, кулак успевает при 0.18–0.36 с.
+#                        Засчитывается только настоящее попадание кулака.
 BALL_RIDE_BOOST = 1.2  # С тем, кто держит, мяч тянет сильнее (он тяжёлый).
 FX_STRENGTH = 0.5  # Сила вспышек, света и тряски камеры (1.0 = максимум).
 FLASH_STRENGTH = 0.4  # Яркость и размер вспышек (1.0 = как в версии 1.5).
@@ -579,15 +581,20 @@ def _start_homing(bomb: Bomb, sender: bs.Node | None,
                 return
             tpos = target.position_center
             want, dist = _norm([a - b for a, b in zip(tpos, bpos)])
-            # Ball-game bots see it coming and decide for themselves.
+            # Ball-game bots see it coming and time their swing.
             ready = getattr(victim, 'bsm_ball_incoming', None)
-            if ready is not None and ready(bomb, dist, speed):
-                return  # Knocked back.
-            grabber = _ball_grabber(bomb, state, bpos) if state.get(
-                'low') else None
-            if grabber is not None:
-                _catch(grabber, bomb)
-                return  # Caught: off it goes with them in tow.
+            if ready is not None:
+                ready(bomb, dist, speed)
+            if state.get('low'):
+                # The ball game counts only what physically happens: a real
+                # fist on the ball (Spaz punch message) or a real bump (its
+                # impact). This is just a backstop.
+                if dist < 0.4:
+                    _stop()
+                    bomb.handlemessage(ExplodeMessage())
+                    return
+                _pingpong_fly(bomb, bnode, state, want, speed)
+                return
             # It goes off when it physically touches them (see
             # _patched_bomb_handle_impact); this is only a backstop - which
             # checks the whole path since last tick, so a fast bomb can't
@@ -993,44 +1000,6 @@ def _hit_heading(spaz: Spaz, toward: bs.Node, start: Sequence[float],
                    toward.position[2] - pos[2]))[0],
             math.radians(random.uniform(-BALL_HIT_SPREAD, BALL_HIT_SPREAD)))
     return _arc_heading(start, toward, wish, speed)
-
-
-def _grab_ready(spaz: Spaz, bomb: Bomb, dist: float) -> bool:
-    """Pressed 'pick up' just now with the ball flying at them close by."""
-    since = bs.time() - getattr(spaz, '_bst_grab_time', -9.0)
-    return (since <= DEFLECT_WINDOW and dist <= BALL_CATCH_DIST
-            and spaz.node and not spaz.frozen and spaz.node.knockout <= 0.0
-            and getattr(bomb, '_bst_flight', None) is not None)
-
-
-def _ball_grabber(bomb: Bomb, state: dict,
-                  bpos: Sequence[float]) -> Spaz | None:
-    """Anyone (not already riding it) who just pressed 'pick up' and has
-    the ball within reach."""
-    for node in _live_fighters():
-        if node == state.get('rider'):
-            continue
-        spaz = node.getdelegate(Spaz)
-        if spaz is not None and _grab_ready(
-                spaz, bomb, math.dist(bpos, node.position_center)):
-            return spaz
-    return None
-
-
-def _ball_grab_press(spaz: Spaz) -> None:
-    """'Pick up' in the ball game: grab the ball if it's at hand now -
-    anyone may, not just the one it's flying at (or within a moment, see
-    _step)."""
-    spaz._bst_grab_time = bs.time()  # type: ignore[attr-defined]
-    game = BallGame.current()
-    ball = game._ball if game is not None else None
-    state = getattr(ball, '_bst_homing', None)
-    if (state is None or not ball.node or not spaz.node
-            or state.get('rider') == spaz.node):
-        return
-    dist = math.dist(ball.node.position, spaz.node.position_center)
-    if _grab_ready(spaz, ball, dist):
-        _catch(spaz, ball)
 
 
 def _catch(spaz: Spaz, bomb: Bomb) -> None:
@@ -2797,13 +2766,14 @@ def _ice_burst(thrower: bs.Node | None, bomb: Bomb, blast: Blast) -> None:
 
 # ------------------------------ Ball game ---------------------------------
 
-# Bot levels: name, chance to return a slow ball, chance at top speed, how
-# briskly they move about, how often they swing at someone close by.
+# Bot levels: name, how far off their swing at the ball can be (seconds,
+# doubles at top speed), how briskly they move about, how often they swing
+# at someone close by.
 _BOT_LEVELS = (
-    ('Лёгкие', 0.80, 0.30, 0.45, 0.06),
-    ('Средние', 0.93, 0.60, 0.6, 0.1),
-    ('Сложные', 0.98, 0.80, 0.75, 0.15),
-    ('Безумные', 1.00, 0.95, 0.9, 0.2),
+    ('Лёгкие', 0.25, 0.45, 0.06),
+    ('Средние', 0.14, 0.6, 0.1),
+    ('Сложные', 0.06, 0.75, 0.15),
+    ('Безумные', 0.02, 0.9, 0.2),
 )
 _BOT_NAMES = ('Вася', 'Маша', 'Кузя', 'Глаша', 'Боря', 'Дуся', 'Тоша',
               'Фрося', 'Гоша', 'Нюша', 'Сеня', 'Зина')
@@ -2876,7 +2846,9 @@ class _BallBot(Spaz):
         self._home = tuple(home)
         self._goal = tuple(home)
         self._goal_time = 0.0
-        self._rolled: tuple | None = None
+        self._leg: tuple | None = None
+        self._swing_at = BALL_SWING_LEAD
+        self._swung = False
         self.node.name = name
         self.node.name_color = _bright(look[1], 1.0)
         self.handlemessage(bs.StandMessage(self._home,
@@ -2905,8 +2877,10 @@ class _BallBot(Spaz):
         ball = BallGame.ball_after(self)
         if ball is not None:
             # It's coming at us: face it, ready to swing.
+            # Keep turned to it (a little step its way) to meet it with
+            # the fist.
             to, dist = _norm((ball[0] - pos[0], 0.0, ball[2] - pos[2]))
-            self._move(to, 0.25 if dist > 3.0 else 0.0)
+            self._move(to, 0.25 if dist > 3.0 else 0.12)
             return
         # Someone right up close: turn on them and have a swing.
         foes = [n for n in _live_fighters() if n != node
@@ -2916,7 +2890,7 @@ class _BallBot(Spaz):
             to, _ = _norm((foe.position[0] - pos[0], 0.0,
                            foe.position[2] - pos[2]))
             self._move(to, 0.3)
-            if random.random() < self._level[4]:
+            if random.random() < self._level[3]:
                 self._swing()
             return
         now = bs.time()
@@ -2929,7 +2903,7 @@ class _BallBot(Spaz):
             self._goal_time = now + random.uniform(1.0, 2.5)
         to, dist = _norm((self._goal[0] - pos[0], 0.0,
                           self._goal[2] - pos[2]))
-        self._move(to, self._level[3] if dist > 0.4 else 0.0)
+        self._move(to, self._level[2] if dist > 0.4 else 0.0)
 
     def _swing(self) -> None:
         if self.node and self.is_alive():
@@ -2937,28 +2911,26 @@ class _BallBot(Spaz):
             bs.timer(0.1, _wcall(Spaz.on_punch_release, self))
 
     def bsm_ball_incoming(self, bomb: Bomb, dist: float,
-                          speed: float) -> bool:
-        """The ball is on its way to us; True if we knocked it on."""
+                          speed: float) -> None:
+        """The ball is on its way to us: swing so the fist meets it. Only a
+        real hit knocks it on (the engine's punch); the level sets how well
+        the swing is timed, the faster the ball the harder."""
         if (not self.node or not self.is_alive() or self.frozen
                 or self.node.knockout > 0.0):
-            return False
-        # Swing when it'll reach us in a couple of ticks.
-        if dist > max(1.6, speed * _TICK * 2.0):
-            return False
+            return
         state = bomb._bst_homing  # type: ignore[attr-defined]
         leg = (id(bomb), state.get('deflects', 0))
-        if self._rolled == leg:
-            return False
-        self._rolled = leg
-        slow, fast = self._level[1], self._level[2]
-        frac = max(0.0, min(1.0, (speed - IMPACT_SPEED)
-                            / (DEFLECT_MAX_SPEED - IMPACT_SPEED)))
-        if random.random() >= slow + (fast - slow) * frac:
-            bs.timer(0.12, _wcall(_BallBot._swing, self))  # Too late.
-            return False
-        self._swing()
-        _deflect_homing(self, bomb)
-        return True
+        if self._leg != leg:
+            # A new approach: how far off this swing will be.
+            frac = max(0.0, min(1.0, (speed - IMPACT_SPEED)
+                                / (DEFLECT_MAX_SPEED - IMPACT_SPEED)))
+            spread = self._level[1] * (1.0 + frac)
+            self._leg = leg
+            self._swing_at = BALL_SWING_LEAD + random.uniform(-spread, spread)
+            self._swung = False
+        if not self._swung and dist / max(speed, 1.0) <= self._swing_at:
+            self._swung = True
+            self._swing()
 
 
 class _BallPlayer(bs.Player['_BallTeam']):
@@ -3317,12 +3289,16 @@ def _patched_handlemessage(self: Spaz, msg: Any) -> Any:
         bomb = hit.getdelegate(Bomb) if fresh else None
 
         # Ping-pong: the homing bomb's target knocks it back at the sender.
+        # (In the ball game anyone but its rider can: a real fist on it.)
         homing = getattr(bomb, '_bst_homing', None)
         if (
             homing is not None
             and getattr(bomb, '_bst_flight', None) is not None
-            and homing['target'] is not None
-            and homing['target'] == self.node
+            and (
+                (homing['target'] is not None
+                 and homing['target'] == self.node)
+                or (homing.get('low') and homing.get('rider') != self.node)
+            )
         ):
             self._punched_nodes.add(hit)
             _deflect_homing(self, bomb)
@@ -3481,21 +3457,11 @@ def _patched_bomb_handle_impact(self: Bomb) -> None:
             self._bst_bump_time = bs.time()  # type: ignore[attr-defined]
             return
         homing = getattr(self, '_bst_homing', None)
-        spaz = node.getdelegate(Spaz)
-        if (homing is not None and homing.get('low') and spaz is not None
-                and homing.get('rider') != node
-                and _grab_ready(spaz, self, 0.0)):
-            _catch(spaz, self)  # Bumped into someone grabbing for it.
-            return
-        if homing is not None and node == homing.get('target'):
+        if (homing is not None and node == homing.get('target')
+                and not homing.get('low')):
             here = self.node.position
             if _try_contact_deflect(self, homing.get('last', here), here):
                 return  # Met their fist: deflected, not hit.
-            # A ball-game bot it bumped into before it could swing: it
-            # still gets its one try.
-            ready = getattr(node.getdelegate(Spaz), 'bsm_ball_incoming', None)
-            if ready is not None and ready(self, 0.0, homing['speed']):
-                return
     _orig_bomb_handle_impact(self)
 
 
@@ -3521,8 +3487,6 @@ def _qte_press(key: str, orig_name: str) -> Any:
                 _qte_input(self, key)
             return  # The QTE (or the countdown) eats the button.
         globals()[orig_name](self)
-        if key == 'pickup' and BallGame.current() is not None:
-            _ball_grab_press(self)
 
     return _press
 
