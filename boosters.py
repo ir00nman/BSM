@@ -95,7 +95,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.22'
+BSM_VERSION = '2.23'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -107,8 +107,11 @@ DEFLECT_SPEEDUP = 1.05  # ...и чуть-чуть при каждом отбив
 DEFLECT_MAX_SPEED = 60.0  # ...но не быстрее этого (м/с).
 PANDA_SPEED = 30.0  # С этой скорости отбивание — «внутренний покой» (раз).
 PANDA_TIME = 0.7  # Сколько бомба кружит вокруг отбивающего (сек).
-DEFLECT_WINDOW = 0.25  # Нажал «Удар» не раньше стольких сек до попадания —
-#                        мяч отбит (на любой скорости, сколько угодно раз).
+DEFLECT_WINDOW = 0.25  # Удар засчитывается, если нажат не раньше стольких
+#                        сек до встречи с мячом (сколько угодно раз).
+FIST_RADIUS = 0.5  # Плоские карты: мяч отбивается касанием кулака — в таком
+#                    радиусе от кулака бьющего (метров).
+FLY_DEFLECT_ZONE = 1.0  # «Счастливые мысли»: зона вокруг бойца (метров).
 PINGPONG_TURN = 5.0  # Как резко отбитая бомба доворачивает (рад/с) — плавно.
 SPIRAL_RADIUS = 0.25  # Лёгкая равномерная спираль в полёте (метров)...
 SPIRAL_RATE = 10.0  # ...и её скорость вращения (рад/с).
@@ -537,10 +540,12 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
             # _patched_bomb_handle_impact); this is only a backstop - which
             # checks the whole path since last tick, so a fast bomb can't
             # skip past them.
-            if (dist < max(0.55, speed * _TICK)
-                    or _seg_dist(state['last'], bpos, tpos) < 0.7):
-                if _try_timed_deflect(bomb):
-                    return  # Punched in time: back it goes.
+            # Fist or body - whichever it meets first along its path since
+            # the last tick (so it can't skip past them at any speed).
+            body_t = _seg_hit_t(state['last'], bpos, tpos, 0.7)
+            if _try_contact_deflect(bomb, state['last'], bpos, body_t):
+                return  # Knocked back.
+            if dist < 0.55 or body_t is not None:
                 _stop()
                 _snd('big_impact', 1.0, bpos)
                 bomb.handlemessage(ExplodeMessage())
@@ -591,9 +596,18 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
     _step()
 
 
-def _try_timed_deflect(bomb: Bomb) -> bool:
-    """The ball reached its target: if they hit punch just before, it's
-    returned - at any speed, as many times as they keep timing it."""
+def _try_contact_deflect(bomb: Bomb, last: Sequence[float],
+                         bpos: Sequence[float],
+                         body_t: float | None = None) -> bool:
+    """Its target returns the ball if they're punching (within
+    DEFLECT_WINDOW) and it meets them on its way since the last tick:
+
+    * on normal maps it has to touch their fist (FIST_RADIUS around it);
+    * on Happy Thoughts, where fists in mid-air are hard to line up, a
+      small zone around the fighter (FLY_DEFLECT_ZONE) is enough.
+
+    Checked along the whole path, so it works at any speed, any number of
+    times."""
     state = getattr(bomb, '_bst_homing', None)
     if state is None or getattr(bomb, '_bst_flight', None) is None:
         return False
@@ -603,6 +617,14 @@ def _try_timed_deflect(bomb: Bomb) -> bool:
         return False
     since = bs.time() * 1000.0 - getattr(spaz, 'last_punch_time_ms', -9999)
     if since > DEFLECT_WINDOW * 1000.0:
+        return False
+    if getattr(spaz, 'fly', False):
+        hit_t = _seg_hit_t(last, bpos, target.position_center,
+                           FLY_DEFLECT_ZONE)
+    else:
+        hit_t = _seg_hit_t(last, bpos, target.punch_position, FIST_RADIUS)
+    # It has to meet the fist (or zone) before it meets the body.
+    if hit_t is None or (body_t is not None and hit_t > body_t):
         return False
     _deflect_homing(spaz, bomb)
     return True
@@ -669,6 +691,26 @@ def _deflect_homing(spaz: Spaz, bomb: Bomb) -> None:
          (0.02, 'swip2', 0.9))
     if back_to is not None:
         _snd('activate_beep', 0.8, back_to.position)
+
+
+def _seg_hit_t(a: Sequence[float], b: Sequence[float], p: Sequence[float],
+               radius: float) -> float | None:
+    """How far along a-b (0..1) it first comes within radius of p, if at
+    all."""
+    d = [b[k] - a[k] for k in range(3)]
+    f = [a[k] - p[k] for k in range(3)]
+    qa = sum(c * c for c in d)
+    qc = sum(c * c for c in f) - radius * radius
+    if qc <= 0.0:
+        return 0.0  # Already inside at the start.
+    if qa < 1e-12:
+        return None
+    qb = 2.0 * sum(d[k] * f[k] for k in range(3))
+    disc = qb * qb - 4.0 * qa * qc
+    if disc < 0.0:
+        return None
+    t = (-qb - math.sqrt(disc)) / (2.0 * qa)
+    return t if 0.0 <= t <= 1.0 else None
 
 
 def _seg_dist(a: Sequence[float], b: Sequence[float],
@@ -2429,9 +2471,10 @@ def _patched_bomb_handle_impact(self: Bomb) -> None:
             self._bst_bump_time = bs.time()  # type: ignore[attr-defined]
             return
         homing = getattr(self, '_bst_homing', None)
-        if (homing is not None and node == homing.get('target')
-                and _try_timed_deflect(self)):
-            return  # Its target punched in time: deflected, not hit.
+        if homing is not None and node == homing.get('target'):
+            here = self.node.position
+            if _try_contact_deflect(self, homing.get('last', here), here):
+                return  # Met their fist: deflected, not hit.
     _orig_bomb_handle_impact(self)
 
 
