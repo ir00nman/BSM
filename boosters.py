@@ -68,7 +68,8 @@
 
 Режим «Мячик» (в списке игр, карта «BSM Арена» — ночной стадион, самое
 большое ровное поле в игре): мяч подаётся из центра и летит по кругу, его
-отбивают кулаком; пропустил — минус жизнь. Боты четырёх уровней сложности,
+отбивают кулаком; пропустил — минус жизнь. Мяч летит низко, уходит туда,
+куда ударили, и мягкой дугой доворачивает к следующему. Боты четырёх уровней сложности,
 урона от ударов нет, бомб и подбора нет.
 
 Работает и на «Счастливых мыслях»: направления и расстояния считаются в 3D.
@@ -104,7 +105,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.24'
+BSM_VERSION = '2.25'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -167,6 +168,9 @@ WHIP_FUSE = 0.8  # Через сколько взрываются налепле
 WHIP_MAX = 9  # Сколько щупалец можно носить.
 BALL_LIVES = 3  # Режим «Мячик»: жизней у каждого по умолчанию.
 BALL_SERVE_DELAY = 1.5  # Пауза перед подачей нового мяча (сек).
+BALL_TURN = 1.5  # Как плавно мяч доворачивает к следующему (рад/с)...
+BALL_TURN_RADIUS = 7.0  # ...на скорости — дугой не круче такого радиуса (м).
+BALL_HIT_SPREAD = 45.0  # Боты отбивают с разбросом в сторону (градусов).
 FX_STRENGTH = 0.5  # Сила вспышек, света и тряски камеры (1.0 = максимум).
 FLASH_STRENGTH = 0.4  # Яркость и размер вспышек (1.0 = как в версии 1.5).
 
@@ -519,7 +523,10 @@ def _start_homing(bomb: Bomb, sender: bs.Node | None,
         'speed': speed0,
         'deflects': prev.get('deflects', 0),
         'panda_done': prev.get('panda_done', False),
-        'pingpong': prev.get('pingpong', False),
+        # The ball game's ball glides low and curves (see _low_fly).
+        'low': getattr(bomb, '_bst_ball_game', None) is not None,
+        'pingpong': (prev.get('pingpong', False)
+                     or getattr(bomb, '_bst_ball_game', None) is not None),
         'dir': direction,
         'vel': tuple(c * speed0 for c in direction),
         'last': bnode.position,
@@ -670,7 +677,10 @@ def _deflect_homing(spaz: Spaz, bomb: Bomb) -> None:
     node = spaz.node
     back_to = _next_in_round(state, node)
     bpos = bomb.node.position
-    if back_to is not None:
+    if state.get('low') and back_to is not None:
+        heading = _hit_heading(spaz, back_to, bpos, min(
+            DEFLECT_MAX_SPEED, state['speed'] * DEFLECT_SPEEDUP))
+    elif back_to is not None:
         heading, _ = _norm([a - b for a, b in zip(back_to.position_center,
                                                   bpos)])
     else:
@@ -896,10 +906,99 @@ def _perp_basis(fwd: Sequence[float]) -> tuple[tuple, tuple]:
     return side, up
 
 
+def _ball_turn_rate(speed: float) -> float:
+    return max(BALL_TURN, speed / BALL_TURN_RADIUS)
+
+
+def _arc_heading(start: Sequence[float], toward: bs.Node,
+                 wish: Sequence[float], speed: float) -> tuple:
+    """The way the ball leaves (wish), but never so far off that its soft
+    arc can't reach the target."""
+    aim, dist = _norm((toward.position[0] - start[0], 0.0,
+                       toward.position[2] - start[2]))
+    wish, wlen = _norm((wish[0], 0.0, wish[2]))
+    if dist < 1e-4:
+        return wish if wlen > 1e-4 else (1.0, 0.0, 0.0)
+    if wlen < 1e-4:
+        return aim
+    # An arc of radius R through a target d away leaving at angle a to it
+    # needs d >= 2 R sin(a); keep a margin.
+    radius = speed / _ball_turn_rate(speed)
+    limit = math.asin(min(1.0, 0.45 * dist / radius))
+    diff = math.atan2(aim[0] * wish[2] - aim[2] * wish[0],
+                      aim[0] * wish[0] + aim[2] * wish[2])
+    return _turn_flat(aim, max(-limit, min(limit, diff)))
+
+
+def _hit_heading(spaz: Spaz, toward: bs.Node, start: Sequence[float],
+                 speed: float) -> tuple:
+    """Ball game: the ball leaves the way it was hit - where a player was
+    facing, a bot's somewhat to one side - and curves round to the next
+    one from there."""
+    if getattr(spaz, 'bsm_team', None) is None:
+        wish = _look_dir(spaz)
+    else:
+        pos = spaz.node.position
+        wish = _turn_flat(
+            _norm((toward.position[0] - pos[0], 0.0,
+                   toward.position[2] - pos[2]))[0],
+            math.radians(random.uniform(-BALL_HIT_SPREAD, BALL_HIT_SPREAD)))
+    return _arc_heading(start, toward, wish, speed)
+
+
+def _turn_flat(vec: Sequence[float], angle: float) -> tuple:
+    """A level heading turned by angle radians."""
+    ca, sa = math.cos(angle), math.sin(angle)
+    return (vec[0] * ca - vec[2] * sa, 0.0, vec[0] * sa + vec[2] * ca)
+
+
+def _low_fly(bomb: Bomb, bnode: bs.Node, state: dict, speed: float) -> None:
+    """The ball game's ball: glides at chest height (never up high) and
+    swings round to its target in a soft arc."""
+    target = state['target']
+    bpos = bnode.position
+    tpos = target.position_center
+    cur = state['dir']
+    cur, clen = _norm((cur[0], 0.0, cur[2]))
+    want, wlen = _norm((tpos[0] - bpos[0], 0.0, tpos[2] - bpos[2]))
+    if clen < 1e-4:
+        cur = want
+    if wlen > 1e-4:
+        # Signed angle to the target, turned by no more than the soft rate
+        # (quicker only if it got past them or is against a wall).
+        diff = math.atan2(cur[0] * want[2] - cur[2] * want[0],
+                          cur[0] * want[0] + cur[2] * want[2])
+        rate = _ball_turn_rate(speed)
+        if abs(diff) > math.pi / 2.0 or bs.time() - getattr(
+                bomb, '_bst_bump_time', -9.0) < 0.15:
+            rate *= 2.0
+        step = rate * _TICK
+        cur = _turn_flat(cur, max(-step, min(step, diff)))
+    state['dir'] = cur
+    # Height: eases to the target's chest, gently.
+    climb = max(-3.0, min(3.0, (tpos[1] + 0.1 - bpos[1]) * 4.0))
+    state['spin'] = state.get('spin', 0.0) + SPIRAL_RATE * _TICK
+    wobble = math.sin(state['spin']) * SPIRAL_RADIUS * SPIRAL_RATE * 0.5
+    vel = (cur[0] * speed - cur[2] * wobble, climb,
+           cur[2] * speed + cur[0] * wobble)
+    state['vel'] = vel
+    state['last'] = bpos
+    bnode.velocity = vel
+    bs.emitfx(position=bpos, velocity=tuple(-c * 3.0 for c in cur),
+              count=2 + int(speed / 8.0), scale=1.0, spread=0.12,
+              chunk_type='spark')
+    if int(state['spin'] * 3) % 2 == 0:
+        bs.emitfx(position=bpos, velocity=(0, 0.5, 0), count=1, scale=0.7,
+                  spread=0.05, chunk_type='sweat')
+
+
 def _pingpong_fly(bomb: Bomb, bnode: bs.Node, state: dict,
                   want: Sequence[float], speed: float) -> None:
     """A knocked-back ball: smooth turns only, a gentle even spiral, big
     sparks. Bumping into floors/walls just eases it upward."""
+    if state.get('low') and state.get('target') is not None:
+        _low_fly(bomb, bnode, state, speed)
+        return
     # Faster ball, tighter turns (so it never sails past at 40+ m/s); on
     # the final approach it simply flies straight in - it's lined up by then.
     turn = max(PINGPONG_TURN, speed / 3.0) * _TICK
@@ -2798,7 +2897,7 @@ class BallGame(bs.TeamGameActivity[_BallPlayer, _BallTeam]):
             self._check_end()
             return
         target = random.choice(fighters)
-        start = (0.0, 4.5, 0.4)
+        start = (0.0, 1.2, 0.4)  # Low, from the middle of the field.
         ball = Bomb(position=start, velocity=(0.0, 0.0, 0.0),
                     bomb_type='impact', bomb_scale=1.2).autoretain()
         ball._bst_levitate = True  # type: ignore[attr-defined]
@@ -2809,8 +2908,11 @@ class BallGame(bs.TeamGameActivity[_BallPlayer, _BallTeam]):
             'height_attenuated': False, 'volume_intensity_scale': 0.2})
         ball.node.connectattr('position', light, 'position')
         self._ball = ball
-        heading, _ = _norm([a - b for a, b in zip(
-            target.node.position_center, start)])
+        aim, _ = _norm((target.node.position[0] - start[0], 0.0,
+                        target.node.position[2] - start[2]))
+        # Served a little to one side: it curves in.
+        heading = _arc_heading(start, target.node, _turn_flat(
+            aim, math.radians(random.uniform(-30.0, 30.0))), IMPACT_SPEED)
         _start_homing(ball, None, target.node, heading)
         bs.emitfx(position=start, velocity=(0.0, 2.0, 0.0), count=30,
                   scale=0.8, spread=0.6, chunk_type='spark')
