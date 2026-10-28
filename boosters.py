@@ -59,7 +59,9 @@
     каждого своё щупальце; бомба и враги притягиваются друг к другу
     (лёгкая бомба летит быстрее), пока не слипнутся, а потом обвивает;
   * удар кулаком по своей липкой бомбе — она превращается в 3 щупальца
-    (до 9). Каждое нажатие «Бомба» — одно щупальце: оно выползает у твоих
+    (до 9). Каждое нажатие «Бомба» — одно щупальце, без перезарядки, и
+    каждое берёт свободного врага (не того, кого уже схватило другое): оно
+    выползает у твоих
     ног и стремительно ползёт по земле к врагу, на которого ты смотришь (узкий
     конус ±15°, на всю карту); кого настигнет первым — под тем встаёт из
     земли, обвивает и валит с ног; на него налепляются 4 липкие мини-бомбы
@@ -107,7 +109,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.27'
+BSM_VERSION = '2.28'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -1895,13 +1897,27 @@ def _wrap_into_whip(spaz: Spaz, bomb: Bomb) -> None:
     _popup_text('ЩУПАЛЬЦЕ!', spaz.node.position, _SLIME)
 
 
+# Tentacles out right now; each one's victim is taken (see _whip_target).
+_WHIPS: list[dict] = []
+
+
+def _whip_taken(node: bs.Node, mine: dict | None = None) -> bool:
+    """Another tentacle is already after (or holding) them."""
+    _WHIPS[:] = [whip for whip in _WHIPS if whip.get('claim')]  # Gone ones.
+    return any(whip is not mine and whip.get('claim') == node
+               for whip in _WHIPS)
+
+
 def _whip_target(spaz: Spaz, facing: Sequence[float]) -> bs.Node | None:
-    """Closest enemy in front (horizontal cone, any height)."""
+    """Who the tentacle goes for: the closest enemy in front (horizontal
+    cone, any height) nobody else's tentacle has; if all in front are
+    taken, the free one nearest to where you look anywhere on the map;
+    only if every enemy is taken, the one in front anyway."""
     facing, _ = _norm((facing[0], 0.0, facing[2]))
     origin = spaz.node.position_center
     min_cos = math.cos(math.radians(WHIP_ANGLE))
-    best: bs.Node | None = None
-    best_score = 0.0
+    cone: list = []
+    free: list = []
     for node in bs.getnodes():
         if not node or node.getnodetype() != 'spaz':
             continue
@@ -1914,12 +1930,18 @@ def _whip_target(spaz: Spaz, facing: Sequence[float]) -> bs.Node | None:
         if dist > WHIP_RANGE or flen < 0.01:
             continue
         cos = flat[0] * facing[0] + flat[2] * facing[2]
-        if cos < min_cos:
-            continue
-        score = dist / cos
-        if best is None or score < best_score:
-            best, best_score = node, score
-    return best
+        taken = _whip_taken(node)
+        if cos >= min_cos:
+            cone.append((dist / cos, taken, node))
+        if not taken:
+            # Off to the side counts for more than far away.
+            free.append((dist * (2.0 - cos), node))
+    for score, taken, node in sorted(cone, key=lambda c: c[0]):
+        if not taken:
+            return node
+    if free:
+        return min(free, key=lambda f: f[0])[1]
+    return min(cone, key=lambda c: c[0])[2] if cone else None
 
 
 def _ground_under(pos: Sequence[float]) -> tuple:
@@ -1960,7 +1982,7 @@ def _fire_whip(spaz: Spaz) -> None:
     spaz._bst_whips -= 1
     charge, spaz._bst_whip_charge = spaz._bst_whip_charge, 0.0
     _update_counter(spaz)
-    spaz._bst_whip_active = True
+    spaz._bst_whip_active = True  # (Any number can be out at once.)
 
     facing = _look_dir(spaz)
     target = _whip_target(spaz, facing)
@@ -1977,9 +1999,11 @@ def _fire_whip(spaz: Spaz) -> None:
         'intensity': 0.8, 'height_attenuated': False,
         'volume_intensity_scale': 0.0})
     source = spaz.source_player
+    glide = _glider(head_light, start)
     state: dict[str, Any] = {'time': 0.0, 'phase': 'crawl', 'victim': None,
                              'minis': [], 'head': start, 'trail': [start],
-                             'crawled': 0.0, 'base': start}
+                             'crawled': 0.0, 'base': start, 'claim': target}
+    _WHIPS.append(state)
 
     bs.emitfx(position=start, velocity=(0, 4, 0), count=10, scale=0.7,
               spread=0.3, chunk_type='rock')
@@ -1989,8 +2013,13 @@ def _fire_whip(spaz: Spaz) -> None:
     _snd('swip2', 0.8, node.position)
 
     def _finish() -> None:
-        spaz._bst_whip_active = False
-        spaz._bst_whip_timer = None
+        if state in _WHIPS:
+            _WHIPS.remove(state)
+        timers = spaz._bst_whip_timers
+        if state.get('timer') in timers:
+            timers.remove(state['timer'])
+        state['timer'] = None
+        spaz._bst_whip_active = bool(timers)
         _delete_all(beads)
         if head_light:
             head_light.delete()
@@ -2031,6 +2060,7 @@ def _fire_whip(spaz: Spaz) -> None:
             return
         state['phase'] = 'hold'
         state['victim'] = victim_node
+        state['claim'] = victim_node
         state['hold_until'] = state['time'] + WHIP_FUSE + 0.45
         vpos = victim_node.position_center
         bs.emitfx(position=vpos, velocity=(0, 3, 0), count=20, scale=0.7,
@@ -2112,8 +2142,11 @@ def _fire_whip(spaz: Spaz) -> None:
             state['trail'].append(head)
             if len(state['trail']) > 200:
                 state['trail'] = state['trail'][-200:]
-            # Grab whoever it reaches first (its target or anyone en route).
+            # Grab whoever it reaches first (its target or anyone en route
+            # no other tentacle has).
             for vnode in _tentacle_targets(spaz, head):
+                if vnode != target and _whip_taken(vnode, state):
+                    continue
                 if math.hypot(vnode.position[0] - head[0],
                               vnode.position[2] - head[2]) < 1.0:
                     _rear_up(vnode)
@@ -2125,8 +2158,7 @@ def _fire_whip(spaz: Spaz) -> None:
                 try:
                     body = _body_along_trail()
                     _draw_tentacle(beads, body, False)
-                    if head_light:
-                        head_light.position = head
+                    _glide_to(glide, head)
                     if int(tnow / _TICK) % 2 == 0:
                         _slime_body(body)
                 except Exception:
@@ -2187,16 +2219,57 @@ def _fire_whip(spaz: Spaz) -> None:
         try:
             pts = _whip_curve(base, tip, tnow * 12.0, amp, len(beads))
             _draw_tentacle(beads, pts, False)
-            if head_light:
-                head_light.position = tip
+            _glide_to(glide, tip)
             if int(tnow / _TICK) % 2 == 0:  # Always visible, even w/o beads.
                 _slime_body(pts)
         except Exception:
             _BEADS_OK[0] = False  # Visuals must never stop the whip.
 
-    spaz._bst_whip_timer = bs.Timer(_TICK, _wcall(lambda s: _step(), spaz),
-                                    repeat=True)
+    # Each tentacle has its own timer, kept on the fighter.
+    state['timer'] = bs.Timer(_TICK, _wcall(lambda s: _step(), spaz),
+                              repeat=True)
+    spaz._bst_whip_timers.append(state['timer'])
     _step()
+
+
+def _glider(node: bs.Node, start: Sequence[float]) -> dict:
+    """Moves a node's position smoothly between our 30 ms ticks: the engine
+    interpolates along curves we only re-aim each tick (no new nodes)."""
+    glide: dict[str, Any] = {'node': node, 'last': tuple(start),
+                             'curves': None}
+    try:
+        gnode = bs.getactivity().globalsnode
+        combine = bs.newnode('combine', owner=node, attrs={'size': 3})
+        curves = []
+        for i in range(3):
+            curve = bs.newnode('animcurve', owner=node, name='Driving')
+            gnode.connectattr('time', curve, 'in')
+            curve.times = [0]
+            curve.values = [start[i]]
+            curve.connectattr('out', combine, f'input{i}')
+            curves.append(curve)
+        combine.connectattr('output', node, 'position')
+        glide['curves'] = curves
+    except Exception:
+        glide['curves'] = None  # Then it just jumps tick to tick.
+    return glide
+
+
+def _glide_to(glide: dict, pos: Sequence[float]) -> None:
+    node = glide['node']
+    if not node:
+        return
+    curves = glide['curves']
+    if curves is None:
+        node.position = tuple(pos)
+        return
+    now = int(bs.time() * 1000.0)
+    step = int(_TICK * 1000.0)
+    for i, curve in enumerate(curves):
+        curve.times = [0, step]
+        curve.values = [glide['last'][i], pos[i]]
+        curve.offset = now
+    glide['last'] = tuple(pos)
 
 
 # ---------------------------- Nuclear suicide -----------------------------
@@ -3205,7 +3278,7 @@ def _patched_init(self: Spaz, *args: Any, **kwargs: Any) -> None:
     self._bst_whips = 0
     self._bst_whip_charge = 0.0
     self._bst_whip_active = False
-    self._bst_whip_timer: bs.Timer | None = None
+    self._bst_whip_timers: list[bs.Timer] = []
     self._bst_shots = 0
     self._bst_shot_charge = 0.0
     self._bst_qte: dict | None = None
@@ -3305,8 +3378,7 @@ def _patched_handlemessage(self: Spaz, msg: Any) -> Any:
 
 def _patched_drop_bomb(self: Spaz) -> Bomb | None:
     if getattr(self, '_bst_whips', 0) > 0 and self.node and not self.frozen:
-        if not self._bst_whip_active:
-            _fire_whip(self)
+        _fire_whip(self)  # No cooldown: as many at once as you've got.
         # Not a bomb: other plugins/games shouldn't treat it as one.
         return None
     if getattr(self, '_bst_shots', 0) > 0 and self.node and not self.frozen:
