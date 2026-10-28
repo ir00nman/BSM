@@ -17,16 +17,17 @@
     касании врага, заряд уходит в её взрыв. Если впереди никого нет — летит
     прямо и взрывается обо что угодно;
   * пинг-понг: цель может отбить летящую в неё бомбу любым ударом — та,
-    как мячик, летит обратно в пославшего (плавно, по лёгкой спирали, в
-    искрах), и теперь отбить может уже он. Так её можно гонять
-    туда-обратно (она разгоняется), пока кто-нибудь не пропустит; после
+    как мячик, летит дальше по кругу (1 → 2 → 3 → … → 1; вдвоём — обратно
+    в пославшего) плавно, по лёгкой спирали, в искрах. Ник того, в кого
+    летит мяч, мигает красным, следующего («готовься») — жёлтым. Мяч
+    разгоняется (12 → 30 м/с), пока кто-нибудь не пропустит; после
     двух отбиваний попадание — мощный направленный взрыв конусом 50°.
 
 Обычная бомба, заряжен:
-  удар кулаком по своей летящей бомбе — она превращается в 4 мини-снаряда
+  удар кулаком по своей летящей бомбе — она превращается в 6 мини-снарядов
   (счётчик над головой). Каждое нажатие «Бомба» выпускает один снаряд прямо
   по взгляду: летит не падая и при попадании отнимает 50% здоровья
-  небольшим аккуратным взрывом.
+  небольшим аккуратным взрывом — попадает сразу, даже в упор.
 
 Мина, заряжен:
   * заряженная мина, взведясь, по одной выкладывает вокруг себя 6 мин ровным
@@ -65,12 +66,18 @@
     и через 0.8 с взрываются прямо на нём (заряд делает взрывы шире). Нет
     никого в конусе — проползает 8 м вперёд.
 
+Режим «Мячик» (в списке игр, карта «BSM Арена» — ночной стадион, самое
+большое ровное поле в игре): мяч подаётся из центра и летит по кругу, его
+отбивают кулаком; пропустил — минус жизнь. Боты четырёх уровней сложности,
+урона от ударов нет, бомб и подбора нет.
+
 Работает и на «Счастливых мыслях»: направления и расстояния считаются в 3D.
 Мод нужен только хосту: в сетевой игре всё считается на сервере.
 """
 
 from __future__ import annotations
 
+import logging
 import math
 import random
 import weakref
@@ -86,8 +93,10 @@ from bascenev1lib.actor.bomb import (
     ExplodeMessage,
 )
 from bascenev1lib.actor.playerspaz import PlayerSpaz
+from bascenev1lib.actor.scoreboard import Scoreboard
 from bascenev1lib.actor.spaz import PunchHitMessage, Spaz
 from bascenev1lib.gameutils import SharedObjects
+from bascenev1lib.maps import FootballStadium
 
 if TYPE_CHECKING:
     from typing import Any, Sequence
@@ -95,17 +104,17 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.23'
+BSM_VERSION = '2.24'
 
 # ------------------------------- Настройки --------------------------------
 
-IMPACT_SPEED = 22.0  # Скорость ударной бомбы после удара (м/с).
+IMPACT_SPEED = 12.0  # Скорость ударной бомбы после удара (м/с).
 IMPACT_FLIGHT_TIME = 4.0  # Сколько она ищет путь к врагу, потом взрывается.
 IMPACT_STEER = 0.3  # Плавность разворотов в полёте (1.0 — мгновенно).
-IMPACT_ACCEL = 5.0  # Самонаводящаяся бомба разгоняется в полёте (м/с за сек)...
-DEFLECT_SPEEDUP = 1.05  # ...и чуть-чуть при каждом отбивании...
-DEFLECT_MAX_SPEED = 60.0  # ...но не быстрее этого (м/с).
-PANDA_SPEED = 30.0  # С этой скорости отбивание — «внутренний покой» (раз).
+IMPACT_ACCEL = 1.5  # Самонаводящаяся бомба разгоняется в полёте (м/с за сек)...
+DEFLECT_SPEEDUP = 1.08  # ...и на 8% при каждом отбивании...
+DEFLECT_MAX_SPEED = 30.0  # ...но не быстрее этого (м/с).
+PANDA_SPEED = 20.0  # С этой скорости отбивание — «внутренний покой» (раз).
 PANDA_TIME = 0.7  # Сколько бомба кружит вокруг отбивающего (сек).
 DEFLECT_WINDOW = 0.25  # Удар засчитывается, если нажат не раньше стольких
 #                        сек до встречи с мячом (сколько угодно раз).
@@ -121,10 +130,12 @@ CONE_LENGTH = 7.0  # Длина конуса (метров).
 CONE_DAMAGE = 900.0  # Урон в конусе вплотную (+ заряд бомбы), к концу слабее.
 SHOT_COUNT = 6  # Сколько мини-снарядов даёт отбитая заряженная бомба.
 SHOT_MAX = 12  # Сколько снарядов можно носить.
-SHOT_SPEED = 20.0  # Скорость снаряда (м/с).
+SHOT_SPEED = 12.0  # Скорость снаряда (м/с).
 SHOT_LIFETIME = 3.0  # Через сколько секунд снаряд взрывается сам.
 SHOT_DAMAGE = 500.0  # Урон снаряда (1000 = полное здоровье).
 SHOT_BLAST_RADIUS = 1.2  # Радиус небольшого взрыва снаряда (метров).
+SHOT_HIT_RADIUS = 0.6  # Снаряд попадает в бойца, пролетев так близко от его
+#                        центра — с первого же мига полёта, хоть вплотную.
 MINE_RING = 6  # Заряженная мина выкладывает столько мин ровным кольцом...
 MINE_RING_DIST = 2.0  # ...на таком расстоянии (соседки тоже в 2 м друг от
 #                       друга — вне радиуса взрыва мины 1.4 м).
@@ -154,6 +165,8 @@ WHIP_CRAWL_SPEED = 20.0  # С какой скоростью щупальце п�
 WHIP_CRAWL_TIME = 12.0  # Сколько оно ползёт, прежде чем сдаться (сек).
 WHIP_FUSE = 0.8  # Через сколько взрываются налепленные мини-бомбы (сек).
 WHIP_MAX = 9  # Сколько щупалец можно носить.
+BALL_LIVES = 3  # Режим «Мячик»: жизней у каждого по умолчанию.
+BALL_SERVE_DELAY = 1.5  # Пауза перед подачей нового мяча (сек).
 FX_STRENGTH = 0.5  # Сила вспышек, света и тряски камеры (1.0 = максимум).
 FLASH_STRENGTH = 0.4  # Яркость и размер вспышек (1.0 = как в версии 1.5).
 
@@ -329,6 +342,9 @@ def _slowmo_off(gnode: bs.Node) -> None:
 
 
 def _team(spaz: Spaz) -> Any:
+    own = getattr(spaz, 'bsm_team', None)  # Ball-game bots: each on its own.
+    if own is not None:
+        return own
     if isinstance(spaz, PlayerSpaz):
         player = spaz.getplayer(bs.Player)
         return player.team if player else None
@@ -477,7 +493,15 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
     if target is not None:  # Lock-on chirp at the target.
         _seq(target.position, (0, 'activate_beep', 0.8),
              (0.08, 'race_beep1', 0.5))
+    _start_homing(bomb, node, target, direction)
 
+
+def _start_homing(bomb: Bomb, sender: bs.Node | None,
+                  target: bs.Node | None,
+                  direction: Sequence[float]) -> None:
+    """Send the bomb flying at the target (straight on if there's none)."""
+    bnode = bomb.node
+    _unleash(bnode)
     # Kept on the bomb so a punch from its target can turn it around. A
     # ball punched again keeps what it had: its speed, how many times it
     # was returned and whether it already did the panda move.
@@ -488,7 +512,10 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
     state: dict[str, Any] = {
         'time': 0.0,
         'target': target,
-        'sender': node,
+        'sender': sender,
+        # Who it goes round: sender, target, then the rest (see
+        # _next_in_round).
+        'order': [n for n in (sender, target) if n],
         'speed': speed0,
         'deflects': prev.get('deflects', 0),
         'panda_done': prev.get('panda_done', False),
@@ -536,6 +563,10 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
                 return
             tpos = target.position_center
             want, dist = _norm([a - b for a, b in zip(tpos, bpos)])
+            # Ball-game bots see it coming and decide for themselves.
+            ready = getattr(victim, 'bsm_ball_incoming', None)
+            if ready is not None and ready(bomb, dist, speed):
+                return  # Knocked back.
             # It goes off when it physically touches them (see
             # _patched_bomb_handle_impact); this is only a backstop - which
             # checks the whole path since last tick, so a fast bomb can't
@@ -594,6 +625,8 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
         _TICK, _step, repeat=True
     )
     _step()
+    if target is not None:
+        _track_ball(bomb)  # Light up who it's after and who's next.
 
 
 def _try_contact_deflect(bomb: Bomb, last: Sequence[float],
@@ -631,13 +664,11 @@ def _try_contact_deflect(bomb: Bomb, last: Sequence[float],
 
 
 def _deflect_homing(spaz: Spaz, bomb: Bomb) -> None:
-    """Its target punched the homing bomb: back like a ball at the sender."""
+    """Its target punched the homing bomb: on like a ball to the next one
+    round (back at the sender when it's just the two of them)."""
     state = bomb._bst_homing  # type: ignore[attr-defined]
     node = spaz.node
-    back_to = state['sender']
-    other = back_to.getdelegate(Spaz) if back_to else None
-    if other is None or not other.is_alive():
-        back_to = None
+    back_to = _next_in_round(state, node)
     bpos = bomb.node.position
     if back_to is not None:
         heading, _ = _norm([a - b for a, b in zip(back_to.position_center,
@@ -664,14 +695,14 @@ def _deflect_homing(spaz: Spaz, bomb: Bomb) -> None:
     if spaz.source_player is not None:
         bomb._source_player = spaz.source_player  # type: ignore[attr-defined]
     bomb.node.velocity = state['vel']
+    _popup_text(f'{speed:.0f} м/с', bpos, _speed_color(speed))
 
     if (speed >= PANDA_SPEED and back_to is not None
             and not state.get('panda_done')):
         _start_panda(spaz, bomb, state)
         return
 
-    ppos = node.punch_position
-    _flash(ppos, _bright(_color(spaz), 2.0), 0.6, 1.0, 1.5, 0.15)
+    _flash(bpos, _bright(_color(spaz), 2.0), 0.6, 1.0, 1.5, 0.15)
     # A clean, showy return: sparks fanned along the new heading and a ring
     # of them around it, the air rippling.
     bs.emitfx(position=bpos, velocity=tuple(c * 12.0 for c in heading),
@@ -691,6 +722,126 @@ def _deflect_homing(spaz: Spaz, bomb: Bomb) -> None:
          (0.02, 'swip2', 0.9))
     if back_to is not None:
         _snd('activate_beep', 0.8, back_to.position)
+
+
+def _unleash(node: bs.Node) -> None:
+    """Bombs are capped at about 10 m/s by the engine (prop max_speed):
+    lift it for anything we fly ourselves, or it never gets faster."""
+    try:
+        node.max_speed = 200.0
+    except Exception:
+        pass
+
+
+def _speed_color(speed: float) -> tuple[float, float, float]:
+    """White when slow, through yellow to red at top speed."""
+    frac = max(0.0, min(1.0, (speed - IMPACT_SPEED)
+                        / (DEFLECT_MAX_SPEED - IMPACT_SPEED)))
+    return (1.0, 1.0 - 0.75 * frac, 1.0 - frac)
+
+
+def _live_fighters() -> list[bs.Node]:
+    out = []
+    for node in bs.getnodes():
+        if not node or node.getnodetype() != 'spaz':
+            continue
+        spaz = node.getdelegate(Spaz)
+        if spaz is not None and spaz.is_alive():
+            out.append(node)
+    return out
+
+
+def _next_in_round(state: dict, after: bs.Node) -> bs.Node | None:
+    """Who the ball goes to once `after` returns it: the next one round
+    (1 → 2 → 3 → … → 1), skipping the dead and the deflector's own team.
+    With two fighters that's simply back and forth."""
+    order: list = state.setdefault('order', [])
+    if after not in order:
+        order.append(after)
+    # Newcomers join the round nearest-first from its end, so the ball goes
+    # round the room rather than zigzagging across it.
+    rest = [n for n in _live_fighters() if n not in order]
+    while rest:
+        last = next((n for n in reversed(order) if n), after)
+        best = min(rest, key=lambda n: math.dist(n.position, last.position))
+        rest.remove(best)
+        order.append(best)
+    me = after.getdelegate(Spaz)
+    start = order.index(after)
+    for step in range(1, len(order)):
+        node = order[(start + step) % len(order)]
+        other = node.getdelegate(Spaz) if node else None
+        if other is None or not other.is_alive():
+            continue
+        if me is None or _is_enemy(me, other):
+            return node
+    return None
+
+
+# The ball's current target's name pulses red, the next one round (who
+# should get ready) glows yellow. One keeper per game looks after all balls
+# and puts names back once nobody's after them.
+_MARK_TARGET = ((1.0, 0.15, 0.1), (1.0, 0.65, 0.55))
+_MARK_NEXT = (1.0, 0.85, 0.15)
+_MARK_TICK = 0.1
+
+
+def _track_ball(bomb: Bomb) -> None:
+    try:
+        activity = bs.getactivity()
+        keeper = activity.customdata.get('bsm_ball_marks')
+        if keeper is None:
+            keeper = {'balls': [], 'orig': {}, 'time': 0.0, 'timer': None}
+            activity.customdata['bsm_ball_marks'] = keeper
+        if not any(ref() is bomb for ref in keeper['balls']):
+            keeper['balls'].append(weakref.ref(bomb))
+        if keeper['timer'] is None:
+            keeper['timer'] = bs.Timer(
+                _MARK_TICK, bs.CallStrict(_marks_tick, keeper), repeat=True)
+        _marks_tick(keeper)
+    except Exception:
+        pass  # Only cosmetics: never in the way of the ball itself.
+
+
+def _marks_tick(keeper: dict) -> None:
+    keeper['time'] += _MARK_TICK
+    roles: dict = {}
+    balls = []
+    for ref in keeper['balls']:
+        bomb = ref()
+        state = getattr(bomb, '_bst_homing', None)
+        if (state is None or not bomb.node
+                or getattr(bomb, '_exploded', False)
+                or getattr(bomb, '_bst_flight', None) is None):
+            continue
+        balls.append(ref)
+        target = state.get('target')
+        if not target:
+            continue
+        upcoming = _next_in_round(state, target)
+        if upcoming and upcoming not in roles:
+            roles[upcoming] = 'next'
+        roles[target] = 'target'
+    keeper['balls'] = balls
+    orig = keeper['orig']
+    wave = 0.5 + 0.5 * math.sin(keeper['time'] * 14.0)
+    hot, soft = _MARK_TARGET
+    for node, role in roles.items():
+        if node not in orig:
+            orig[node] = (node.name, node.name_color)
+            if not node.name:
+                node.name = '●'  # Nameless (bots): a dot to light up.
+        node.name_color = (tuple(h + (s - h) * wave for h, s in zip(hot, soft))
+                           if role == 'target' else _MARK_NEXT)
+    for node in list(orig):
+        if node in roles:
+            continue
+        name, color = orig.pop(node)
+        if node:
+            node.name = name
+            node.name_color = color
+    if not balls and not orig:
+        keeper['timer'] = None
 
 
 def _seg_hit_t(a: Sequence[float], b: Sequence[float], p: Sequence[float],
@@ -772,8 +923,10 @@ def _pingpong_fly(bomb: Bomb, bnode: bs.Node, state: dict,
     state['last'] = bnode.position
     bnode.velocity = vel
     bpos = bnode.position
+    # The faster it goes, the thicker its trail.
     bs.emitfx(position=bpos, velocity=tuple(-c * 3.0 for c in heading),
-              count=4, scale=1.0, spread=0.12, chunk_type='spark')
+              count=2 + int(speed / 8.0), scale=1.0, spread=0.12,
+              chunk_type='spark')
     if int(state['spin'] * 3) % 2 == 0:
         bs.emitfx(position=bpos, velocity=(0, 0.5, 0), count=1, scale=0.7,
                   spread=0.05, chunk_type='sweat')
@@ -789,8 +942,15 @@ def _cone_blast(bomb: Bomb) -> None:
         return
     state = bomb._bst_homing  # type: ignore[attr-defined]
     pos = bnode.position
-    fwd, flen = _norm(state.get('dir', (1.0, 0.0, 0.0)))
-    if flen < 1e-4:
+    # Level on the ground: a ball that dives in from above still blasts on
+    # past them, not into the floor. (In mid-air on Happy Thoughts it
+    # keeps the angle it flew in at.)
+    fly = state.get('dir', (1.0, 0.0, 0.0))
+    target = state.get('target')
+    victim = target.getdelegate(Spaz) if target else None
+    tilt = 1.0 if getattr(victim, 'fly', False) else 0.0
+    fwd, flen = _norm((fly[0], fly[1] * tilt, fly[2]))
+    if flen < 0.2:
         fwd = (1.0, 0.0, 0.0)
     damage = CONE_DAMAGE + _bomb_charge(bomb)
     min_cos = math.cos(math.radians(CONE_ANGLE / 2.0))
@@ -1002,14 +1162,14 @@ def _panda_step(bomb: Bomb, state: dict) -> None:
               spread=0.05, chunk_type='spark')
 
 
-def _shell_pop(shell: Bomb) -> None:
+def _shell_pop(shell: Bomb, at: Sequence[float] | None = None) -> None:
     """A mini shell hits: half a health bar off whoever it got, with a
     small, tidy blast (no big shock wave)."""
     if getattr(shell, '_exploded', False) or not shell.node:
         return
     shell._exploded = True  # pylint: disable=protected-access
     shell._bst_flight = None  # type: ignore[attr-defined]
-    pos = shell.node.position
+    pos = tuple(at) if at is not None else shell.node.position
     source = shell.get_source_player(bs.Player)
     owner = shell.owner
     for node in bs.getnodes():
@@ -1090,6 +1250,7 @@ def _fire_shot(spaz: Spaz) -> None:
     shot._bst_shell = True  # type: ignore[attr-defined]
 
     snode = shot.node
+    _unleash(snode)
     col = _bright(_color(spaz), 1.0)
     # Glowing core in the shooter's color.
     glow = bs.newnode('light', owner=snode, attrs={
@@ -1103,7 +1264,9 @@ def _fire_shot(spaz: Spaz) -> None:
     up = (side[1] * facing[2] - side[2] * facing[1],
           side[2] * facing[0] - side[0] * facing[2],
           side[0] * facing[1] - side[1] * facing[0])
-    state = {'time': 0.0}
+    # Flown from the shooter's middle, so someone standing right up close
+    # (between them and the muzzle) is hit too.
+    state = {'time': 0.0, 'last': center}
 
     def _step() -> None:
         state['time'] += _TICK
@@ -1114,8 +1277,20 @@ def _fire_shot(spaz: Spaz) -> None:
             shot._bst_flight = None  # type: ignore[attr-defined]
             shot.handlemessage(ExplodeMessage())
             return
-        snode.velocity = vel  # Dead straight, no drop.
         pos = snode.position
+        # The game only lets a fresh bomb go off on contact after 0.2 s
+        # (4 m at this speed), so hits are checked here, along the whole
+        # way since last tick, from the very first moment.
+        hit = _shell_victim(state['last'], pos, node)
+        if hit is not None:
+            _shell_pop(shot, hit)
+            return
+        _, moved = _norm([a - b for a, b in zip(pos, state['last'])])
+        if state['time'] > _TICK * 1.5 and moved < SHOT_SPEED * _TICK * 0.3:
+            _shell_pop(shot)  # Stopped dead: into a wall right away.
+            return
+        state['last'] = pos
+        snode.velocity = vel  # Dead straight, no drop.
         spin = state['time'] * 30.0
         for phase, chunk in ((0.0, 'spark'), (math.pi, 'sweat')):
             ca, sa = math.cos(spin + phase), math.sin(spin + phase)
@@ -1143,6 +1318,26 @@ def _fire_shot(spaz: Spaz) -> None:
     _snd('laser', 0.6, start)
     _snd('swip2', 0.8, start)
     _snd('cork_pop', 0.6, start)
+    _step()  # Point blank: hits whoever is right in front at once.
+
+
+def _shell_victim(a: Sequence[float], b: Sequence[float],
+                  owner: bs.Node) -> tuple | None:
+    """Where along a-b the shell first meets a fighter (not its shooter)."""
+    best_t: float | None = None
+    for node in _live_fighters():
+        if node == owner:
+            continue
+        center = node.position_center
+        hit_t = _seg_hit_t(a, b, center, SHOT_HIT_RADIUS)
+        if hit_t == 0.0 and sum((center[k] - a[k]) * (b[k] - a[k])
+                                for k in range(3)) < 0.0:
+            continue  # Hugging the shooter from behind: not in the way.
+        if hit_t is not None and (best_t is None or hit_t < best_t):
+            best_t = hit_t
+    if best_t is None:
+        return None
+    return tuple(a[k] + (b[k] - a[k]) * best_t for k in range(3))
 
 
 def _kick_mine(spaz: Spaz, mine: Bomb) -> None:
@@ -2292,6 +2487,453 @@ def _ice_burst(thrower: bs.Node | None, bomb: Bomb, blast: Blast) -> None:
         _seq(pos, (boom_at - 0.25, 'tick', 0.6))  # Tick-tick... boom.
 
 
+# ------------------------------ Ball game ---------------------------------
+
+# Bot levels: name, chance to return a slow ball, chance at top speed, how
+# briskly they move about.
+_BOT_LEVELS = (
+    ('Лёгкие', 0.80, 0.30, 0.45),
+    ('Средние', 0.93, 0.60, 0.6),
+    ('Сложные', 0.98, 0.80, 0.75),
+    ('Безумные', 1.00, 0.95, 0.9),
+)
+_BOT_NAMES = ('Вася', 'Маша', 'Кузя', 'Глаша', 'Боря', 'Дуся', 'Тоша',
+              'Фрося', 'Гоша', 'Нюша', 'Сеня', 'Зина')
+_BOT_LOOKS = (
+    ('Spaz', (0.9, 0.3, 0.2), (1.0, 0.8, 0.3)),
+    ('Zoe', (0.3, 0.6, 1.0), (1.0, 1.0, 1.0)),
+    ('Kronk', (0.3, 0.8, 0.3), (0.9, 0.9, 0.2)),
+    ('Mel', (1.0, 0.5, 0.8), (0.4, 0.2, 0.6)),
+    ('Jack Morgan', (0.8, 0.6, 0.2), (0.2, 0.2, 0.2)),
+    ('Frosty', (0.6, 0.9, 1.0), (0.3, 0.5, 1.0)),
+    ('Bones', (0.9, 0.9, 0.9), (0.5, 0.2, 0.9)),
+    ('Agent Johnson', (0.3, 0.3, 0.35), (1.0, 0.3, 0.3)),
+    ('Pixel', (1.0, 0.8, 0.2), (0.2, 0.9, 0.9)),
+    ('Bernard', (0.6, 0.4, 0.2), (0.9, 0.6, 0.3)),
+)
+
+
+class _BallArena(FootballStadium):
+    """The stadium by night: the biggest flat field in the game, lit up
+    for a ball match."""
+
+    name = 'BSM Арена'
+
+    @classmethod
+    def get_play_types(cls) -> list[str]:
+        return ['bsm_ball', 'melee', 'keep_away', 'team_flag']
+
+    def __init__(self) -> None:
+        super().__init__()
+        gnode = bs.getactivity().globalsnode
+        gnode.tint = (0.75, 0.8, 1.0)
+        gnode.ambient_color = (0.8, 0.85, 1.1)
+        gnode.vignette_outer = (0.4, 0.42, 0.55)
+        gnode.vignette_inner = (0.95, 0.95, 1.0)
+        # Floodlights round the field.
+        for xpos in (-9.0, 0.0, 9.0):
+            for zpos in (-4.0, 4.8):
+                bs.newnode('light', attrs={
+                    'position': (xpos, 6.0, zpos), 'radius': 0.9,
+                    'intensity': 0.35, 'color': (0.8, 0.85, 1.0),
+                    'height_attenuated': False,
+                    'volume_intensity_scale': 0.1})
+
+
+def _ball_slots(count: int) -> list[tuple[float, float, float]]:
+    """Places evenly round an oval in the middle of the field."""
+    return [(math.cos(2.0 * math.pi * i / count + math.pi) * 7.0, 0.5,
+             0.4 + math.sin(2.0 * math.pi * i / count + math.pi) * 3.2)
+            for i in range(max(1, count))]
+
+
+def _hearts(lives: int) -> str:
+    return '♥' * max(0, lives)
+
+
+class _BallPlayerSpaz(PlayerSpaz):
+    """Punches and bumps don't hurt in the ball game: only the ball counts."""
+
+    def handlemessage(self, msg: Any) -> Any:
+        if isinstance(msg, bs.HitMessage):
+            return True
+        return super().handlemessage(msg)
+
+
+class _BallBot(Spaz):
+    """A ball-game bot: strolls about its spot and, when the ball comes at
+    it, tries to punch it on - how well depends on its level and the speed
+    of the ball."""
+
+    def __init__(self, level: int, name: str, look: tuple,
+                 home: Sequence[float], lives: int) -> None:
+        super().__init__(color=look[1], highlight=look[2], character=look[0],
+                         start_invincible=False, can_accept_powerups=False)
+        self.bsm_team = object()  # Everyone's opponent.
+        self.lives = lives
+        self._level = _BOT_LEVELS[level]
+        self._home = tuple(home)
+        self._goal = tuple(home)
+        self._goal_time = 0.0
+        self._rolled: tuple | None = None
+        self.node.name = name
+        self.node.name_color = _bright(look[1], 1.0)
+        self.handlemessage(bs.StandMessage(self._home,
+                                           random.uniform(0.0, 360.0)))
+        self._think_timer = bs.Timer(0.1, _wcall(_BallBot._think, self),
+                                     repeat=True)
+
+    def handlemessage(self, msg: Any) -> Any:
+        if isinstance(msg, bs.HitMessage):
+            return True
+        return super().handlemessage(msg)
+
+    def _move(self, vec: Sequence[float], speed: float) -> None:
+        self.on_move_left_right(vec[0] * speed)
+        self.on_move_up_down(-vec[2] * speed)
+
+    def _think(self) -> None:
+        node = self.node
+        if not node or not self.is_alive() or self.frozen:
+            return
+        pos = node.position
+        ball = BallGame.ball_after(self)
+        if ball is not None:
+            # It's coming at us: face it, ready to swing.
+            to, dist = _norm((ball[0] - pos[0], 0.0, ball[2] - pos[2]))
+            self._move(to, 0.25 if dist > 3.0 else 0.0)
+            return
+        now = bs.time()
+        if now > self._goal_time or math.dist(pos, self._goal) < 0.4:
+            # Somewhere new near our spot (now and then just stand still).
+            ang = random.uniform(0.0, 2.0 * math.pi)
+            rad = random.uniform(0.0, 1.6)
+            self._goal = (self._home[0] + math.cos(ang) * rad, self._home[1],
+                          self._home[2] + math.sin(ang) * rad)
+            self._goal_time = now + random.uniform(1.0, 2.5)
+        to, dist = _norm((self._goal[0] - pos[0], 0.0,
+                          self._goal[2] - pos[2]))
+        self._move(to, self._level[3] if dist > 0.4 else 0.0)
+
+    def _swing(self) -> None:
+        if self.node and self.is_alive():
+            self.on_punch_press()
+            bs.timer(0.1, _wcall(Spaz.on_punch_release, self))
+
+    def bsm_ball_incoming(self, bomb: Bomb, dist: float,
+                          speed: float) -> bool:
+        """The ball is on its way to us; True if we knocked it on."""
+        if (not self.node or not self.is_alive() or self.frozen
+                or self.node.knockout > 0.0):
+            return False
+        # Swing when it'll reach us in a couple of ticks.
+        if dist > max(1.6, speed * _TICK * 2.0):
+            return False
+        state = bomb._bst_homing  # type: ignore[attr-defined]
+        leg = (id(bomb), state.get('deflects', 0))
+        if self._rolled == leg:
+            return False
+        self._rolled = leg
+        _, slow, fast, _ = self._level
+        frac = max(0.0, min(1.0, (speed - IMPACT_SPEED)
+                            / (DEFLECT_MAX_SPEED - IMPACT_SPEED)))
+        if random.random() >= slow + (fast - slow) * frac:
+            bs.timer(0.12, _wcall(_BallBot._swing, self))  # Too late.
+            return False
+        self._swing()
+        _deflect_homing(self, bomb)
+        return True
+
+
+class _BallPlayer(bs.Player['_BallTeam']):
+    """A player in the ball game."""
+
+    playerspaztype = _BallPlayerSpaz
+
+    def __init__(self) -> None:
+        self.lives = 0
+        self.slot: tuple | None = None
+
+
+class _BallTeam(bs.Team[_BallPlayer]):
+    """A team in the ball game."""
+
+    def __init__(self) -> None:
+        self.score = 0
+
+
+class BallGame(bs.TeamGameActivity[_BallPlayer, _BallTeam]):
+    """Dodgeball the BSM way: the ball flies round from one to the next,
+    faster and faster; punch it on or lose a life."""
+
+    name = 'Мячик'
+    description = ('Отбивай мяч кулаком — он летит дальше по кругу и '
+                   'разгоняется. Пропустил — минус жизнь.')
+    allow_mid_activity_joins = False
+
+    _current: weakref.ref | None = None
+
+    @classmethod
+    def get_available_settings(
+        cls, sessiontype: type[bs.Session]
+    ) -> list[bs.Setting]:
+        return [
+            bs.IntSetting('Боты', default=3, min_value=0, max_value=10),
+            bs.IntChoiceSetting(
+                'Сложность ботов',
+                choices=[(level[0], i) for i, level in
+                         enumerate(_BOT_LEVELS)],
+                default=1),
+            bs.IntSetting('Жизни', default=BALL_LIVES, min_value=1,
+                          max_value=10),
+            bs.BoolSetting('Epic Mode', default=False),
+        ]
+
+    @classmethod
+    def supports_session_type(cls, sessiontype: type[bs.Session]) -> bool:
+        return issubclass(sessiontype, (bs.DualTeamSession,
+                                        bs.FreeForAllSession))
+
+    @classmethod
+    def get_supported_maps(cls, sessiontype: type[bs.Session]) -> list[str]:
+        return [_BallArena.name, 'Football Stadium']
+
+    @classmethod
+    def ball_after(cls, bot: _BallBot) -> tuple | None:
+        """Where the ball is, if it's flying at this bot."""
+        game = cls._current() if cls._current is not None else None
+        ball = game._ball if game is not None else None
+        state = getattr(ball, '_bst_homing', None)
+        if state is None or not ball.node or state.get('target') != bot.node:
+            return None
+        return ball.node.position
+
+    def __init__(self, settings: dict):
+        super().__init__(settings)
+        self._bot_count = int(settings.get('Боты', 3))
+        self._level = int(settings.get('Сложность ботов', 1))
+        self._lives = int(settings.get('Жизни', BALL_LIVES))
+        self._epic = bool(settings.get('Epic Mode', False))
+        self.slow_motion = self._epic
+        self.default_music = (bs.MusicType.EPIC if self._epic
+                              else bs.MusicType.SPORTS)
+        self._bots: list[_BallBot] = []
+        self._ball: Bomb | None = None
+        self._serve_timer: bs.Timer | None = None
+        self._tick_timer: bs.Timer | None = None
+        self._out = 0  # How many have been knocked out so far.
+        self._ended = False
+        self._slots: list = []
+        self._scoreboard = Scoreboard()
+
+    def get_instance_description(self) -> str | Sequence:
+        return self.description
+
+    def get_instance_description_short(self) -> str | Sequence:
+        return 'отбивай мяч дальше по кругу'
+
+    def on_player_join(self, player: _BallPlayer) -> None:
+        if self.has_begun():
+            player.lives = 0  # Sits this match out.
+            bs.broadcastmessage(f'{player.getname()}: дождись следующего '
+                                f'матча', color=(1.0, 1.0, 0.4))
+            return
+        player.lives = self._lives
+        self.spawn_player(player)
+
+    def on_player_leave(self, player: _BallPlayer) -> None:
+        super().on_player_leave(player)
+        bs.timer(0.1, bs.WeakCallStrict(self._check_end))
+
+    def _slot(self) -> tuple:
+        if not self._slots:
+            total = len(self.session.sessionplayers) + self._bot_count
+            self._slots = _ball_slots(total)
+            random.shuffle(self._slots)
+        return self._slots.pop()
+
+    def spawn_player(self, player: _BallPlayer) -> bs.Actor:
+        if player.slot is None:
+            player.slot = self._slot()
+        spaz = self.spawn_player_spaz(player, player.slot)
+        # Fists only: no bombs, nothing to pick up (and no grabbing the
+        # ball).
+        spaz.connect_controls_to_player(enable_bomb=False,
+                                        enable_pickup=False)
+        spaz.set_score_text(_hearts(player.lives), color=(1.0, 0.3, 0.3))
+        return spaz
+
+    def on_begin(self) -> None:
+        super().on_begin()
+        BallGame._current = weakref.ref(self)
+        names = random.sample(_BOT_NAMES, min(len(_BOT_NAMES),
+                                              self._bot_count))
+        for i in range(self._bot_count):
+            look = _BOT_LOOKS[i % len(_BOT_LOOKS)]
+            name = names[i] if i < len(names) else f'Бот {i + 1}'
+            bot = _BallBot(self._level, name, look, self._slot(), self._lives)
+            bot.set_score_text(_hearts(bot.lives), color=(1.0, 0.3, 0.3))
+            self._bots.append(bot)
+        self._update_scoreboard()
+        self._serve_timer = bs.Timer(2.0, bs.WeakCallStrict(self._serve))
+        self._tick_timer = bs.Timer(0.5, bs.WeakCallStrict(self._tick),
+                                    repeat=True)
+
+    def _fighters(self) -> list[Spaz]:
+        out: list[Spaz] = [bot for bot in self._bots
+                           if bot.node and bot.is_alive()]
+        for player in self.players:
+            actor = player.actor
+            if (player.lives > 0 and isinstance(actor, Spaz) and actor.node
+                    and actor.is_alive()):
+                out.append(actor)
+        return out
+
+    def _serve(self) -> None:
+        self._serve_timer = None
+        if self._ended:
+            return
+        fighters = self._fighters()
+        if len(fighters) < 2:
+            self._check_end()
+            return
+        target = random.choice(fighters)
+        start = (0.0, 4.5, 0.4)
+        ball = Bomb(position=start, velocity=(0.0, 0.0, 0.0),
+                    bomb_type='impact', bomb_scale=1.2).autoretain()
+        ball._bst_levitate = True  # type: ignore[attr-defined]
+        ball._bst_ball_game = weakref.ref(self)  # type: ignore[attr-defined]
+        ball.arm()
+        light = bs.newnode('light', owner=ball.node, attrs={
+            'color': (1.0, 0.9, 0.6), 'radius': 0.15, 'intensity': 0.7,
+            'height_attenuated': False, 'volume_intensity_scale': 0.2})
+        ball.node.connectattr('position', light, 'position')
+        self._ball = ball
+        heading, _ = _norm([a - b for a, b in zip(
+            target.node.position_center, start)])
+        _start_homing(ball, None, target.node, heading)
+        bs.emitfx(position=start, velocity=(0.0, 2.0, 0.0), count=30,
+                  scale=0.8, spread=0.6, chunk_type='spark')
+        _seq(start, (0, 'ref_whistle', 0.8), (0.05, 'activate_beep', 0.7))
+
+    def bsm_ball_hit(self, ball: Bomb) -> None:
+        """The ball went off: whoever didn't return it loses a life."""
+        state = getattr(ball, '_bst_homing', None) or {}
+        ball._exploded = True  # pylint: disable=protected-access
+        ball._bst_flight = None  # type: ignore[attr-defined]
+        if ball is self._ball:
+            self._ball = None
+        pos = ball.node.position if ball.node else (0.0, 1.0, 0.4)
+        victim: Spaz | None = None
+        target = state.get('target')
+        spaz = target.getdelegate(Spaz) if target else None
+        if (spaz is not None and spaz.is_alive()
+                and math.dist(target.position_center, pos) < 2.0):
+            victim = spaz
+        else:
+            # It went off on someone else who got in its way.
+            near = [s for s in self._fighters() if s.node != ball.owner
+                    and math.dist(s.node.position_center, pos) < 1.3]
+            if near:
+                victim = min(near, key=lambda s: math.dist(
+                    s.node.position_center, pos))
+        expl = bs.newnode('explosion', attrs={'position': pos,
+                                               'radius': 0.9})
+        bs.timer(1.0, expl.delete)
+        bs.emitfx(position=pos, velocity=(0.0, 3.0, 0.0), count=40,
+                  scale=1.0, spread=0.6, chunk_type='spark')
+        _shake(1.5)
+        _seq(pos, (0, 'explosion01', 0.8), (0, 'big_impact', 0.9),
+             (0.05, 'score_hit01', 0.7))
+        if ball.node:
+            ball.handlemessage(bs.DieMessage())
+        if victim is not None:
+            self._lose_life(victim, state.get('dir', (0.0, 0.0, 1.0)))
+        if not self._ended:
+            self._serve_timer = bs.Timer(BALL_SERVE_DELAY,
+                                         bs.WeakCallStrict(self._serve))
+
+    def _lose_life(self, spaz: Spaz, push: Sequence[float]) -> None:
+        node = spaz.node
+        pos = node.position_center
+        node.handlemessage('impulse', pos[0], pos[1], pos[2], 0.0, 0.0, 0.0,
+                           600.0, 60.0, 0.0, 0, push[0], push[1] + 0.4,
+                           push[2])
+        node.handlemessage('knockout', 300.0)
+        player = spaz.getplayer(_BallPlayer) if isinstance(
+            spaz, PlayerSpaz) else None
+        if player is not None:
+            player.lives -= 1
+            lives = player.lives
+        else:
+            spaz.lives -= 1  # type: ignore[attr-defined]
+            lives = spaz.lives  # type: ignore[attr-defined]
+        spaz.set_score_text(_hearts(lives) or 'ВЫБЫЛ', color=(1.0, 0.3, 0.3),
+                            flash=True)
+        _popup_text('-1 ♥', node.position, (1.0, 0.3, 0.3))
+        if lives <= 0:
+            self._out += 1
+            if player is not None:
+                player.team.score = max(player.team.score, self._out)
+            bs.timer(0.8, _wcall(BallGame._knock_out, spaz))
+            _snd('boo', 0.6)
+        else:
+            _snd('cheer', 0.4)
+        self._update_scoreboard()
+        bs.timer(1.0, bs.WeakCallStrict(self._check_end))
+
+    @staticmethod
+    def _knock_out(spaz: Spaz) -> None:
+        if spaz.node and spaz.is_alive():
+            spaz.handlemessage(bs.DieMessage())
+
+    def handlemessage(self, msg: Any) -> Any:
+        if isinstance(msg, bs.PlayerDiedMessage):
+            super().handlemessage(msg)
+            player = msg.getplayer(_BallPlayer)
+            if player.lives > 0:
+                self.respawn_player(player)
+            bs.timer(0.1, bs.WeakCallStrict(self._check_end))
+            return None
+        return super().handlemessage(msg)
+
+    def _tick(self) -> None:
+        # A ball lost off the map (or anything else): serve a new one.
+        if (not self._ended and self._serve_timer is None
+                and (self._ball is None or not self._ball.node)):
+            self._ball = None
+            self._serve_timer = bs.Timer(BALL_SERVE_DELAY,
+                                         bs.WeakCallStrict(self._serve))
+        self._check_end()
+
+    def _check_end(self) -> None:
+        if self._ended or not self.has_begun():
+            return
+        humans = [p for p in self.players if p.lives > 0]
+        bots = [b for b in self._bots if b.lives > 0 and b.node]
+        teams = {p.team for p in humans}
+        sides = len(teams) + len(bots)
+        # Over when one side is left - or when every human is out.
+        if sides <= 1 or (self.players and not humans):
+            self._ended = True
+            bs.timer(1.0, bs.WeakCallStrict(self.end_game))
+
+    def _update_scoreboard(self) -> None:
+        for team in self.teams:
+            self._scoreboard.set_team_value(
+                team, sum(max(0, p.lives) for p in team.players),
+                self._lives * max(1, len(team.players)))
+
+    def end_game(self) -> None:
+        if self._ball is not None and self._ball.node:
+            self._ball.handlemessage(bs.DieMessage())
+        results = bs.GameResults()
+        for team in self.teams:
+            alive = any(p.lives > 0 for p in team.players)
+            results.set_team_score(team, team.score + (100 if alive else 0))
+        self.end(results=results)
+
+
 # ------------------------------- Patches ----------------------------------
 
 
@@ -2438,6 +3080,17 @@ def _patched_bomb_handlemessage(self: Bomb, msg: Any) -> Any:
     if isinstance(msg, ExplodeMessage) and getattr(self, '_bst_shell', False):
         _shell_pop(self)
         return None
+    game_ref = getattr(self, '_bst_ball_game', None)
+    if game_ref is not None:
+        # The ball game's ball: punches and blasts don't set it off; when
+        # it goes off, the game sorts out who missed it.
+        if isinstance(msg, bs.HitMessage):
+            return None
+        game = game_ref()
+        if (isinstance(msg, ExplodeMessage) and game is not None
+                and not getattr(self, '_exploded', False)):
+            game.bsm_ball_hit(self)
+            return None
     homing = getattr(self, '_bst_homing', None)
     if (
         isinstance(msg, ExplodeMessage)
@@ -2475,6 +3128,11 @@ def _patched_bomb_handle_impact(self: Bomb) -> None:
             here = self.node.position
             if _try_contact_deflect(self, homing.get('last', here), here):
                 return  # Met their fist: deflected, not hit.
+            # A ball-game bot it bumped into before it could swing: it
+            # still gets its one try.
+            ready = getattr(node.getdelegate(Spaz), 'bsm_ball_incoming', None)
+            if ready is not None and ready(self, 0.0, homing['speed']):
+                return
     _orig_bomb_handle_impact(self)
 
 
@@ -2543,3 +3201,22 @@ class BoostersPlugin(babase.Plugin):
         Spaz.on_punch_press = _qte_press('punch', '_orig_punch_press')
         Spaz.on_bomb_press = _qte_press('bomb', '_orig_bomb_press')
         Spaz.on_pickup_press = _qte_press('pickup', '_orig_pickup_press')
+        _register_ball_game()
+
+
+def _register_ball_game() -> None:
+    """The ball game and its arena join the game lists (only from the copy
+    that patched the game, so they're never listed twice)."""
+    try:
+        if _BallArena.name not in babase.app.classic.maps:
+            bs.register_map(_BallArena)
+    except Exception:
+        logging.exception('BSM: could not add the ball arena')
+    try:
+        exports = babase.app.meta.scanresults.exports.setdefault(
+            'bascenev1.GameActivity', [])
+        path = f'{__name__}.BallGame'
+        if path not in exports:
+            exports.append(path)
+    except Exception:
+        logging.exception('BSM: could not add the ball game')
