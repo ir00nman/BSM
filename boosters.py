@@ -110,7 +110,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.33'
+BSM_VERSION = '2.34'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -145,7 +145,8 @@ SHOT_HIT_RADIUS = 0.6  # Снаряд попадает в бойца, проле
 MAX_CHARGE_TRIGGER = 3000.0  # Особые усиления при полном заряде щита (300%).
 HOMING_SHOT_TURN = 3.2  # Плавность самонаведения полных обычных снарядов.
 IMPACT_TOUR_STEER = 0.10  # Мягкие, хорошо читаемые повороты ударной на 300%.
-IMPACT_TOUR_DAMAGE = 350.0  # Урон при пролёте сквозь промежуточную цель.
+ROUTE_BLAST_RADIUS = 1.25  # Взрыв на каждой цели маршрутного снаряда.
+ROUTE_TURN_TIME = 0.32  # Заметный боковой вираж после каждого попадания.
 ICE_ORB_SPEED = 11.0  # Скорость самонаводящегося ледяного заряда.
 ICE_ORB_MAX = 3  # Сколько ледяных зарядов можно накопить.
 MINE_RING = 6  # Заряженная мина выкладывает столько мин ровным кольцом...
@@ -686,6 +687,8 @@ def _start_homing(bomb: Bomb, sender: bs.Node | None,
                 state['avoid_until'] = tnow + 0.15
                 state['slow'] = 0
             fdir = state['avoid_dir'] if tnow < state['avoid_until'] else want
+            if tnow < state.get('route_turn_until', 0.0):
+                fdir = state['route_turn_dir']
             # Scraping the floor: just lift off it a bit and slide along.
             if bs.time() - getattr(bomb, '_bst_bump_time', -9.0) < 0.12:
                 fdir, _ = _norm((fdir[0], fdir[1] + 0.35, fdir[2]))
@@ -719,18 +722,8 @@ def _impact_tour_hit(bomb: Bomb, target: bs.Node | None,
     if state is None or not bomb.node:
         return
     if target is not None and target and damage:
-        source = bomb.get_source_player(bs.Player)
         direction, _ = _norm(state.get('vel', (0.0, 1.0, 0.0)))
-        target.handlemessage(bs.HitMessage(
-            pos=target.position_center,
-            source_player=bs.existing(source),
-            force_direction=direction,
-            flat_damage=IMPACT_TOUR_DAMAGE,
-            hit_type='impact',
-            hit_subtype='normal',
-        ))
-        _flash(target.position_center, (1.4, 0.6, 0.2), 0.55, 0.8, 1.2, 0.12)
-        _snd('impact_hard', 0.75, target.position_center)
+        _route_blast(bomb, target.position_center, direction, ice=False)
     elif target is not None and target:
         _ring(target.position_center, (1.0, 0.45, 0.15), 2.2, 0.2)
         _snd('shield_hit', 0.8, target.position_center)
@@ -739,7 +732,7 @@ def _impact_tour_hit(bomb: Bomb, target: bs.Node | None,
     if next_target is None:
         state['touring'] = False
         bomb._bst_flight = None  # type: ignore[attr-defined]
-        bomb.handlemessage(ExplodeMessage())
+        bomb.handlemessage(bs.DieMessage())
         return
     state.update({
         'target': next_target,
@@ -749,7 +742,7 @@ def _impact_tour_hit(bomb: Bomb, target: bs.Node | None,
         'avoid_until': 0.0,
         'attempt': 0,
     })
-    _retarget_now(bomb, state, next_target)
+    _start_route_turn(bomb, state, next_target)
     _snd('activate_beep', 0.7, next_target.position_center)
 
 
@@ -768,20 +761,47 @@ def _next_impact_target(state: dict) -> bs.Node | None:
     return None
 
 
-def _retarget_now(bomb: Bomb, state: dict, target: bs.Node) -> None:
-    """Pull a routed projectile clear of the fighter it just touched."""
+def _start_route_turn(bomb: Bomb, state: dict, target: bs.Node) -> None:
+    """Make a clearly visible side-step before homing onto the next target."""
     if not bomb.node or not target:
         return
-    heading, length = _norm([
+    toward, length = _norm([
         target.position_center[k] - bomb.node.position[k] for k in range(3)
     ])
     if length < 1e-4:
         return
+    side, _ = _perp_basis(toward)
+    sign = -1.0 if state.get('route_turn_side', 1.0) > 0.0 else 1.0
+    turn, _ = _norm((side[0] * sign + toward[0] * 0.15,
+                     0.45 + toward[1] * 0.15,
+                     side[2] * sign + toward[2] * 0.15))
     speed = state.get('speed', IMPACT_SPEED)
-    velocity = tuple(component * speed for component in heading)
-    state['dir'] = heading
+    velocity = tuple(component * speed for component in turn)
+    state['dir'] = turn
     state['vel'] = velocity
+    state['route_turn_dir'] = turn
+    state['route_turn_until'] = ROUTE_TURN_TIME
+    state['route_turn_side'] = sign
     bomb.node.velocity = velocity
+
+
+def _route_blast(bomb: Bomb, position: Sequence[float],
+                 direction: Sequence[float], ice: bool) -> None:
+    """A real blast at a route stop, offset so it spares its projectile."""
+    source = bomb.get_source_player(bs.Player)
+    # Leave the blast just behind the projectile. Its diameter remains large
+    # enough to cover the fighter it touched without catching the projectile
+    # as it immediately banks away.
+    center = tuple(position[k] - direction[k] * 0.45 for k in range(3))
+    Blast(
+        position=center,
+        velocity=tuple(direction[k] * 2.0 for k in range(3)),
+        blast_radius=ROUTE_BLAST_RADIUS,
+        blast_type='ice' if ice else 'impact',
+        source_player=source,
+        hit_type='explosion',
+        hit_subtype='ice' if ice else 'impact',
+    ).autoretain()
 
 
 def _try_contact_deflect(bomb: Bomb, last: Sequence[float],
@@ -2913,9 +2933,8 @@ def _ice_orb_advance(orb: Bomb, target: bs.Node | None,
     if state is None or not orb.node:
         return
     if target is not None and target and freeze:
-        _ice_punch(target)
-        bs.emitfx(position=target.position_center, velocity=(0, 4, 0),
-                  count=24, scale=0.8, spread=0.5, chunk_type='ice')
+        direction, _ = _norm(state.get('vel', (0.0, 1.0, 0.0)))
+        _route_blast(orb, target.position_center, direction, ice=True)
     elif target is not None and target:
         _ring(target.position_center, _ICE, 2.2, 0.2)
         _snd('shield_hit', 0.7, target.position_center)
@@ -2937,7 +2956,7 @@ def _ice_orb_advance(orb: Bomb, target: bs.Node | None,
         'attempt': 0,
         'pingpong': False,
     })
-    _retarget_now(orb, state, next_target)
+    _start_route_turn(orb, state, next_target)
     _snd('activate_beep', 0.65, next_target.position_center)
 
 
@@ -3695,6 +3714,13 @@ def _patched_set_land_mine_count(self: Spaz, count: int) -> None:
 
 
 def _patched_bomb_handlemessage(self: Bomb, msg: Any) -> Any:
+    homing = getattr(self, '_bst_homing', None)
+    if (isinstance(msg, bs.HitMessage)
+            and (getattr(self, '_bst_ice_orb', False)
+                 or bool(homing and homing.get('touring')))):
+        # Route-stop blasts must hit nearby fighters and props, but never
+        # knock their own carrier out of its multi-target flight.
+        return None
     if isinstance(msg, ExplodeMessage) and getattr(self, '_bst_ice_orb', False):
         if self.node:
             pos = self.node.position
@@ -3726,7 +3752,6 @@ def _patched_bomb_handlemessage(self: Bomb, msg: Any) -> Any:
                 and not getattr(self, '_exploded', False)):
             game.bsm_ball_hit(self)
             return None
-    homing = getattr(self, '_bst_homing', None)
     if (
         isinstance(msg, ExplodeMessage)
         and homing is not None
