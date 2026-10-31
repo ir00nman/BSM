@@ -109,7 +109,7 @@ if TYPE_CHECKING:
     from typing import Any, Sequence
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.35'
+BSM_VERSION = '2.36'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -145,6 +145,7 @@ MAX_CHARGE_TRIGGER = 3000.0  # Особые усиления при полном
 HOMING_SHOT_TURN = 3.2  # Плавность самонаведения полных обычных снарядов.
 IMPACT_TOUR_STEER = 0.10  # Мягкие, хорошо читаемые повороты ударной на 300%.
 ROUTE_BLAST_RADIUS = 1.25  # Взрыв на каждой цели маршрутного снаряда.
+ROUTE_KILL_DAMAGE = 10000.0  # Контактная на 300% ваншотит основную цель.
 ROUTE_TURN_TIME = 0.32  # Заметный боковой вираж после каждого попадания.
 ICE_ORB_SPEED = 11.0  # Скорость самонаводящегося ледяного заряда.
 ICE_ORB_MAX = 3  # Сколько ледяных зарядов можно накопить.
@@ -723,6 +724,14 @@ def _impact_tour_hit(bomb: Bomb, target: bs.Node | None,
     if target is not None and target and damage:
         direction, _ = _norm(state.get('vel', (0.0, 1.0, 0.0)))
         _route_blast(bomb, target.position_center, direction, ice=False)
+        target.handlemessage(bs.HitMessage(
+            pos=target.position_center,
+            source_player=bs.existing(bomb.get_source_player(bs.Player)),
+            force_direction=direction,
+            flat_damage=ROUTE_KILL_DAMAGE,
+            hit_type='explosion',
+            hit_subtype='impact',
+        ))
     elif target is not None and target:
         _ring(target.position_center, (1.0, 0.45, 0.15), 2.2, 0.2)
         _snd('shield_hit', 0.8, target.position_center)
