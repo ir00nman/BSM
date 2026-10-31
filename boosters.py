@@ -94,6 +94,7 @@ import bascenev1 as bs
 from bascenev1 import _classicassets
 from bascenev1lib.actor.bomb import (
     ArmMessage,
+    Blast,
     Bomb,
     BombFactory,
     ExplodeMessage,
@@ -107,10 +108,8 @@ from bascenev1lib.maps import FootballStadium
 if TYPE_CHECKING:
     from typing import Any, Sequence
 
-    from bascenev1lib.actor.bomb import Blast
-
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.34'
+BSM_VERSION = '2.35'
 
 # ------------------------------- Настройки --------------------------------
 
