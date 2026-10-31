@@ -110,7 +110,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.32'
+BSM_VERSION = '2.33'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -749,6 +749,7 @@ def _impact_tour_hit(bomb: Bomb, target: bs.Node | None,
         'avoid_until': 0.0,
         'attempt': 0,
     })
+    _retarget_now(bomb, state, next_target)
     _snd('activate_beep', 0.7, next_target.position_center)
 
 
@@ -765,6 +766,22 @@ def _next_impact_target(state: dict) -> bs.Node | None:
         if victim is not None and victim.is_alive():
             return target
     return None
+
+
+def _retarget_now(bomb: Bomb, state: dict, target: bs.Node) -> None:
+    """Pull a routed projectile clear of the fighter it just touched."""
+    if not bomb.node or not target:
+        return
+    heading, length = _norm([
+        target.position_center[k] - bomb.node.position[k] for k in range(3)
+    ])
+    if length < 1e-4:
+        return
+    speed = state.get('speed', IMPACT_SPEED)
+    velocity = tuple(component * speed for component in heading)
+    state['dir'] = heading
+    state['vel'] = velocity
+    bomb.node.velocity = velocity
 
 
 def _try_contact_deflect(bomb: Bomb, last: Sequence[float],
@@ -2920,6 +2937,7 @@ def _ice_orb_advance(orb: Bomb, target: bs.Node | None,
         'attempt': 0,
         'pingpong': False,
     })
+    _retarget_now(orb, state, next_target)
     _snd('activate_beep', 0.65, next_target.position_center)
 
 
@@ -3741,6 +3759,16 @@ def _patched_bomb_handle_impact(self: Bomb) -> None:
             self._bst_bump_time = bs.time()  # type: ignore[attr-defined]
             return
         homing = getattr(self, '_bst_homing', None)
+        # After switching targets the projectile can remain physically
+        # touching the previous fighter for another collision tick. Never
+        # let that stale contact fall through to Bomb._handle_impact(), which
+        # would explode a tour bomb (or delete an ice orb) after its first
+        # target.
+        routed = (getattr(self, '_bst_ice_orb', False)
+                  or bool(homing and homing.get('touring')))
+        if routed and (homing is None or node != homing.get('target')):
+            self._bst_bump_time = bs.time()  # type: ignore[attr-defined]
+            return
         if (homing is not None and node == homing.get('target')
                 and not homing.get('low')):
             here = self.node.position
