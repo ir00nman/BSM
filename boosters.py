@@ -110,7 +110,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.30'
+BSM_VERSION = '2.31'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -142,6 +142,12 @@ SHOT_DAMAGE = 500.0  # Урон снаряда (1000 = полное здоров
 SHOT_BLAST_RADIUS = 1.2  # Радиус небольшого взрыва снаряда (метров).
 SHOT_HIT_RADIUS = 0.6  # Снаряд попадает в бойца, пролетев так близко от его
 #                        центра — с первого же мига полёта, хоть вплотную.
+MAX_CHARGE_TRIGGER = 3000.0  # Особые усиления при полном заряде щита (300%).
+HOMING_SHOT_TURN = 3.2  # Плавность самонаведения полных обычных снарядов.
+IMPACT_TOUR_STEER = 0.10  # Мягкие, хорошо читаемые повороты ударной на 300%.
+IMPACT_TOUR_DAMAGE = 350.0  # Урон при пролёте сквозь промежуточную цель.
+ICE_ORB_SPEED = 11.0  # Скорость самонаводящегося ледяного заряда.
+ICE_ORB_MAX = 3  # Сколько ледяных зарядов можно накопить.
 MINE_RING = 6  # Заряженная мина выкладывает столько мин ровным кольцом...
 MINE_RING_DIST = 2.0  # ...на таком расстоянии (соседки тоже в 2 м друг от
 #                       друга — вне радиуса взрыва мины 1.4 м).
@@ -451,6 +457,23 @@ def _find_target(spaz: Spaz, origin: Sequence[float],
     return best
 
 
+def _enemy_route(spaz: Spaz, origin: Sequence[float]) -> list[bs.Node]:
+    """All living enemies, in a readable nearest-neighbour route."""
+    left = []
+    for node in _live_fighters():
+        other = node.getdelegate(Spaz)
+        if other is not None and _is_enemy(spaz, other):
+            left.append(node)
+    route: list[bs.Node] = []
+    pos = tuple(origin)
+    while left:
+        node = min(left, key=lambda n: math.dist(pos, n.position_center))
+        left.remove(node)
+        route.append(node)
+        pos = node.position_center
+    return route
+
+
 def _avoid_dirs(want: Sequence[float]) -> list[tuple[float, float, float]]:
     """Ways around an obstacle: over, under or past it on either side."""
     side, slen = _norm((-want[2], 0.0, want[0]))  # Horizontal perpendicular.
@@ -475,7 +498,9 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
     if dlen < 0.1:
         direction, _ = _norm([a - b for a, b in zip(bnode.position,
                                                     node.position)])
-    target = _find_target(spaz, bnode.position, direction)
+    charge = _bomb_charge(bomb) or float(getattr(spaz, '_ab_stored', 0.0))
+    tour = _enemy_route(spaz, bnode.position) if charge >= MAX_CHARGE_TRIGGER else []
+    target = tour.pop(0) if tour else _find_target(spaz, bnode.position, direction)
     if target is None:
         # Nobody ahead: a plain shot, goes off on whatever it hits.
         direction, _ = _norm((direction[0], max(direction[1], 0.08),
@@ -506,12 +531,13 @@ def _launch_impact_bomb(spaz: Spaz, bomb: Bomb) -> None:
     if target is not None:  # Lock-on chirp at the target.
         _seq(target.position, (0, 'activate_beep', 0.8),
              (0.08, 'race_beep1', 0.5))
-    _start_homing(bomb, node, target, direction)
+    _start_homing(bomb, node, target, direction, tour=tour)
 
 
 def _start_homing(bomb: Bomb, sender: bs.Node | None,
                   target: bs.Node | None,
-                  direction: Sequence[float]) -> None:
+                  direction: Sequence[float],
+                  tour: list[bs.Node] | None = None) -> None:
     """Send the bomb flying at the target (straight on if there's none)."""
     bnode = bomb.node
     _unleash(bnode)
@@ -543,6 +569,10 @@ def _start_homing(bomb: Bomb, sender: bs.Node | None,
         'avoid_until': 0.0,
         'avoid_dir': direction,
         'attempt': 0,
+        'tour': list(tour or []),
+        'touring': tour is not None,
+        'ice_owner': getattr(bomb, '_bst_ice_owner', None),
+        'ice_route': list(getattr(bomb, '_bst_ice_route', [])),
     }
     bomb._bst_homing = state  # type: ignore[attr-defined]
     _speed_label(bomb, speed0)
@@ -576,8 +606,17 @@ def _start_homing(bomb: Bomb, sender: bs.Node | None,
             if victim is None or not victim.is_alive() or (
                 tnow > IMPACT_FLIGHT_TIME
             ):
+                if getattr(bomb, '_bst_ice_orb', False):
+                    _ice_orb_advance(bomb, None, freeze=False)
+                    return
+                if state.get('touring') and state.get('tour'):
+                    _impact_tour_hit(bomb, None)
+                    return
                 _stop()
-                bomb.handlemessage(ExplodeMessage())
+                if getattr(bomb, '_bst_ice_orb', False):
+                    bomb.handlemessage(bs.DieMessage())
+                else:
+                    bomb.handlemessage(ExplodeMessage())
                 return
             tpos = target.position_center
             want, dist = _norm([a - b for a, b in zip(tpos, bpos)])
@@ -602,9 +641,20 @@ def _start_homing(bomb: Bomb, sender: bs.Node | None,
             # Fist or body - whichever it meets first along its path since
             # the last tick (so it can't skip past them at any speed).
             body_t = _seg_hit_t(state['last'], bpos, tpos, 0.7)
+            if (getattr(bomb, '_bst_ice_orb', False)
+                    and getattr(victim, '_ab_active', False)
+                    and (dist < 0.55 or body_t is not None)):
+                _ice_orb_advance(bomb, target, freeze=False)
+                return
             if _try_contact_deflect(bomb, state['last'], bpos, body_t):
                 return  # Knocked back.
             if dist < 0.55 or body_t is not None:
+                if getattr(bomb, '_bst_ice_orb', False):
+                    _ice_orb_advance(bomb, target, freeze=True)
+                    return
+                if state.get('tour'):
+                    _impact_tour_hit(bomb, target)
+                    return
                 _stop()
                 _snd('big_impact', 1.0, bpos)
                 bomb.handlemessage(ExplodeMessage())
@@ -640,7 +690,8 @@ def _start_homing(bomb: Bomb, sender: bs.Node | None,
         state['last'] = bpos
         # Turn smoothly instead of snapping to the new heading.
         goal = tuple(c * speed for c in fdir)
-        vel = tuple(v + (g - v) * IMPACT_STEER
+        steer = IMPACT_TOUR_STEER if state.get('touring') else IMPACT_STEER
+        vel = tuple(v + (g - v) * steer
                     for v, g in zip(state['vel'], goal))
         state['vel'] = vel
         bnode.velocity = vel
@@ -655,6 +706,49 @@ def _start_homing(bomb: Bomb, sender: bs.Node | None,
     _step()
     if target is not None:
         _track_ball(bomb)  # Light up who it's after and who's next.
+
+
+def _impact_tour_hit(bomb: Bomb, target: bs.Node | None) -> None:
+    """Tag one fighter and send a full-charge impact bomb to the next."""
+    state = getattr(bomb, '_bst_homing', None)
+    if state is None or not bomb.node:
+        return
+    if target is not None and target:
+        source = bomb.get_source_player(bs.Player)
+        direction, _ = _norm(state.get('vel', (0.0, 1.0, 0.0)))
+        target.handlemessage(bs.HitMessage(
+            pos=target.position_center,
+            source_player=bs.existing(source),
+            force_direction=direction,
+            flat_damage=IMPACT_TOUR_DAMAGE,
+            hit_type='impact',
+            hit_subtype='normal',
+        ))
+        _flash(target.position_center, (1.4, 0.6, 0.2), 0.55, 0.8, 1.2, 0.12)
+        _snd('impact_hard', 0.75, target.position_center)
+
+    route = state.get('tour', [])
+    next_target = None
+    while route:
+        candidate = route.pop(0)
+        victim = candidate.getdelegate(Spaz) if candidate else None
+        if victim is not None and victim.is_alive():
+            next_target = candidate
+            break
+    if next_target is None:
+        state['touring'] = False
+        bomb._bst_flight = None  # type: ignore[attr-defined]
+        bomb.handlemessage(ExplodeMessage())
+        return
+    state.update({
+        'target': next_target,
+        'time': 0.0,
+        'last': bomb.node.position,
+        'slow': 0,
+        'avoid_until': 0.0,
+        'attempt': 0,
+    })
+    _snd('activate_beep', 0.7, next_target.position_center)
 
 
 def _try_contact_deflect(bomb: Bomb, last: Sequence[float],
@@ -712,7 +806,18 @@ def _deflect_homing(spaz: Spaz, bomb: Bomb) -> None:
     round (back at the sender when it's just the two of them)."""
     state = bomb._bst_homing  # type: ignore[attr-defined]
     node = spaz.node
-    back_to = _next_in_round(state, node)
+    if getattr(bomb, '_bst_ice_orb', False):
+        owner = state.get('ice_owner')
+        if node == owner:
+            back_to = state.pop('ice_resume', None)
+            victim = back_to.getdelegate(Spaz) if back_to else None
+            if victim is None or not victim.is_alive():
+                back_to = _next_ice_target(state)
+        else:
+            state['ice_resume'] = _next_ice_target(state)
+            back_to = owner
+    else:
+        back_to = _next_in_round(state, node)
     bpos = bomb.node.position
     if state.get('low') and back_to is not None:
         heading = _hit_heading(spaz, back_to, bpos, min(
@@ -734,7 +839,9 @@ def _deflect_homing(spaz: Spaz, bomb: Bomb) -> None:
         'slow': 0,
         'avoid_until': 0.0,
         'attempt': 0,
-        'pingpong': True,
+        'pingpong': not getattr(bomb, '_bst_ice_orb', False),
+        'tour': [],
+        'touring': False,
         'deflects': state.get('deflects', 0) + 1,
     })
     # The deflector is now the one it won't go off on, and gets the credit.
@@ -744,7 +851,13 @@ def _deflect_homing(spaz: Spaz, bomb: Bomb) -> None:
     bomb.node.velocity = state['vel']
     _let_go(state, bomb)  # Knocked out of the rider's hands.
 
-    if (speed >= PANDA_SPEED and back_to is not None
+    if getattr(bomb, '_bst_ice_orb', False) and back_to is None:
+        bomb._bst_flight = None  # type: ignore[attr-defined]
+        bomb.handlemessage(bs.DieMessage())
+        return
+
+    if (not getattr(bomb, '_bst_ice_orb', False)
+            and speed >= PANDA_SPEED and back_to is not None
             and not state.get('panda_done')):
         _start_panda(spaz, bomb, state)
         return
@@ -1413,7 +1526,11 @@ def _bomb_to_shots(spaz: Spaz, bomb: Bomb) -> None:
     charge = _bomb_charge(bomb) or Spaz.bsm_take_charge(spaz)
     bpos = bomb.node.position
     bomb.handlemessage(bs.DieMessage())  # Consumed, never goes off.
-    spaz._bst_shots = min(SHOT_MAX, spaz._bst_shots + SHOT_COUNT)
+    old_count = spaz._bst_shots
+    spaz._bst_shots = min(SHOT_MAX, old_count + SHOT_COUNT)
+    added = spaz._bst_shots - old_count
+    if charge >= MAX_CHARGE_TRIGGER:
+        spaz._bst_homing_shots += added
     spaz._bst_shot_charge += charge
     _update_counter(spaz)
 
@@ -1425,14 +1542,18 @@ def _bomb_to_shots(spaz: Spaz, bomb: Bomb) -> None:
     _snd('metal_hit', 1.0, bpos)
     _snd('cork_pop', 0.8, bpos)
     _snd('powerup01', 0.7, bpos)
-    _popup_text(f'СНАРЯДЫ x{SHOT_COUNT}', spaz.node.position,
+    label = 'САМОНАВОДКА' if charge >= MAX_CHARGE_TRIGGER else 'СНАРЯДЫ'
+    _popup_text(f'{label} x{added}', spaz.node.position,
                 _bright(_color(spaz), 1.0))
 
 
 def _fire_shot(spaz: Spaz) -> None:
-    """One mini shell straight where the fighter looks; it doesn't drop."""
+    """Fire one mini shell; full-charge shells home smoothly on enemies."""
     node = spaz.node
     spaz._bst_shots -= 1
+    homing = spaz._bst_homing_shots > 0
+    if homing:
+        spaz._bst_homing_shots -= 1
     _update_counter(spaz)
 
     facing = _look_dir(spaz)
@@ -1472,7 +1593,12 @@ def _fire_shot(spaz: Spaz) -> None:
           side[0] * facing[1] - side[1] * facing[0])
     # Flown from the shooter's middle, so someone standing right up close
     # (between them and the muzzle) is hit too.
-    state = {'time': 0.0, 'last': center}
+    state = {
+        'time': 0.0,
+        'last': center,
+        'heading': facing,
+        'target': _homing_shot_target(spaz, start, facing) if homing else None,
+    }
 
     def _step() -> None:
         state['time'] += _TICK
@@ -1484,6 +1610,19 @@ def _fire_shot(spaz: Spaz) -> None:
             shot.handlemessage(ExplodeMessage())
             return
         pos = snode.position
+        heading = state['heading']
+        target = state['target']
+        victim = target.getdelegate(Spaz) if target else None
+        if homing and (victim is None or not victim.is_alive()):
+            target = _homing_shot_target(spaz, pos, heading)
+            state['target'] = target
+        if target is not None:
+            want, _ = _norm([target.position_center[k] - pos[k]
+                             for k in range(3)])
+            heading = _turn_toward(
+                heading, want, HOMING_SHOT_TURN * _TICK
+            )
+            state['heading'] = heading
         # The game only lets a fresh bomb go off on contact after 0.2 s
         # (4 m at this speed), so hits are checked here, along the whole
         # way since last tick, from the very first moment.
@@ -1496,7 +1635,7 @@ def _fire_shot(spaz: Spaz) -> None:
             _shell_pop(shot)  # Stopped dead: into a wall right away.
             return
         state['last'] = pos
-        snode.velocity = vel  # Dead straight, no drop.
+        snode.velocity = tuple(c * SHOT_SPEED for c in heading)
         spin = state['time'] * 30.0
         for phase, chunk in ((0.0, 'spark'), (math.pi, 'sweat')):
             ca, sa = math.cos(spin + phase), math.sin(spin + phase)
@@ -1525,6 +1664,21 @@ def _fire_shot(spaz: Spaz) -> None:
     _snd('swip2', 0.8, start)
     _snd('cork_pop', 0.6, start)
     _step()  # Point blank: hits whoever is right in front at once.
+
+
+def _homing_shot_target(spaz: Spaz, origin: Sequence[float],
+                        heading: Sequence[float]) -> bs.Node | None:
+    """Prefer an enemy in front; fall back to the nearest enemy on the map."""
+    candidates = []
+    for target in _live_fighters():
+        other = target.getdelegate(Spaz)
+        if other is None or not _is_enemy(spaz, other):
+            continue
+        toward, dist = _norm([target.position_center[k] - origin[k]
+                              for k in range(3)])
+        dot = sum(toward[k] * heading[k] for k in range(3))
+        candidates.append((dot < 0.35, dist, -dot, target))
+    return min(candidates, default=(True, 0.0, 0.0, None))[-1]
 
 
 def _shell_victim(a: Sequence[float], b: Sequence[float],
@@ -1860,6 +2014,9 @@ def _update_counter(spaz: Spaz) -> None:
     if spaz._bst_whips > 0:
         node.counter_text = f'x{spaz._bst_whips}'
         node.counter_texture = _classicassets.textures.powerup_sticky_bombs.get()
+    elif spaz._bst_ice_orbs > 0:
+        node.counter_text = f'x{spaz._bst_ice_orbs}'
+        node.counter_texture = _classicassets.textures.powerup_ice_bombs.get()
     elif spaz._bst_shots > 0:
         node.counter_text = f'x{spaz._bst_shots}'
         node.counter_texture = _classicassets.textures.powerup_bomb.get()
@@ -2653,6 +2810,90 @@ def _absorb_ice_bomb(spaz: Spaz, bomb: Bomb) -> None:
     duration = min(ICE_FISTS_MAX_TIME,
                    ICE_FISTS_TIME + charge * ICE_FISTS_PER_CHARGE)
     _give_ice_fists(spaz, duration)
+    if charge >= MAX_CHARGE_TRIGGER:
+        spaz._bst_ice_orbs = min(ICE_ORB_MAX, spaz._bst_ice_orbs + 1)
+        _update_counter(spaz)
+        _popup_text('ЛЕДЯНОЙ ЗАРЯД x1', spaz.node.position, _ICE)
+
+
+def _fire_ice_orb(spaz: Spaz) -> None:
+    """Fire the full-charge ice reward through every enemy in sequence."""
+    node = spaz.node
+    spaz._bst_ice_orbs -= 1
+    _update_counter(spaz)
+    facing = _look_dir(spaz)
+    center = node.position_center
+    start = tuple(center[k] + facing[k] * 0.9 for k in range(3))
+    route = _enemy_route(spaz, start)
+    target = route.pop(0) if route else None
+    orb = Bomb(
+        position=start,
+        velocity=tuple(c * ICE_ORB_SPEED for c in facing),
+        bomb_type='impact',
+        blast_radius=0.1,
+        bomb_scale=0.6,
+        source_player=spaz.source_player,
+        owner=node,
+    ).autoretain()
+    orb._bst_ice_orb = True  # type: ignore[attr-defined]
+    orb._bst_levitate = True  # type: ignore[attr-defined]
+    orb._bst_ice_owner = node  # type: ignore[attr-defined]
+    orb._bst_ice_route = route  # type: ignore[attr-defined]
+    orb.arm()
+    _start_homing(orb, node, target, facing)
+    state = orb._bst_homing  # type: ignore[attr-defined]
+    state['speed'] = ICE_ORB_SPEED
+    state['vel'] = tuple(c * ICE_ORB_SPEED for c in facing)
+    orb.node.velocity = state['vel']
+    _flash(start, _ICE, 0.7, 1.1, 2.0, 0.2)
+    _ring(start, _ICE, 2.0, 0.25)
+    _seq(start, (0, 'freeze', 0.9), (0, 'laser', 0.7),
+         (0.02, 'swip2', 0.8))
+
+
+def _next_ice_target(state: dict) -> bs.Node | None:
+    """Take the next still-living target from an ice orb's route."""
+    route = state.setdefault('ice_route', [])
+    while route:
+        target = route.pop(0)
+        victim = target.getdelegate(Spaz) if target else None
+        if victim is not None and victim.is_alive():
+            return target
+    return None
+
+
+def _ice_orb_advance(orb: Bomb, target: bs.Node | None,
+                     freeze: bool) -> None:
+    """Freeze or skip the current target, then continue through the route."""
+    state = getattr(orb, '_bst_homing', None)
+    if state is None or not orb.node:
+        return
+    if target is not None and target and freeze:
+        _ice_punch(target)
+        bs.emitfx(position=target.position_center, velocity=(0, 4, 0),
+                  count=24, scale=0.8, spread=0.5, chunk_type='ice')
+    elif target is not None and target:
+        _ring(target.position_center, _ICE, 2.2, 0.2)
+        _snd('shield_hit', 0.7, target.position_center)
+
+    next_target = state.pop('ice_resume', None)
+    victim = next_target.getdelegate(Spaz) if next_target else None
+    if victim is None or not victim.is_alive():
+        next_target = _next_ice_target(state)
+    if next_target is None:
+        orb._bst_flight = None  # type: ignore[attr-defined]
+        orb.handlemessage(bs.DieMessage())
+        return
+    state.update({
+        'target': next_target,
+        'time': 0.0,
+        'last': orb.node.position,
+        'slow': 0,
+        'avoid_until': 0.0,
+        'attempt': 0,
+        'pingpong': False,
+    })
+    _snd('activate_beep', 0.65, next_target.position_center)
 
 
 def _give_ice_fists(spaz: Spaz, duration: float) -> None:
@@ -3271,7 +3512,9 @@ def _patched_init(self: Spaz, *args: Any, **kwargs: Any) -> None:
     self._bst_whip_active = False
     self._bst_whip_timers: list[bs.Timer] = []
     self._bst_shots = 0
+    self._bst_homing_shots = 0
     self._bst_shot_charge = 0.0
+    self._bst_ice_orbs = 0
     self._bst_qte: dict | None = None
 
 
@@ -3376,6 +3619,9 @@ def _patched_drop_bomb(self: Spaz) -> Bomb | None:
         _fire_whip(self)  # No cooldown: as many at once as you've got.
         # Not a bomb: other plugins/games shouldn't treat it as one.
         return None
+    if getattr(self, '_bst_ice_orbs', 0) > 0 and self.node and not self.frozen:
+        _fire_ice_orb(self)
+        return None
     if getattr(self, '_bst_shots', 0) > 0 and self.node and not self.frozen:
         _fire_shot(self)
         return None
@@ -3397,11 +3643,22 @@ def _patched_drop_bomb(self: Spaz) -> Bomb | None:
 
 def _patched_set_land_mine_count(self: Spaz, count: int) -> None:
     _orig_set_land_mine_count(self, count)
-    if getattr(self, '_bst_whips', 0) > 0 or getattr(self, '_bst_shots', 0) > 0:
+    if (getattr(self, '_bst_whips', 0) > 0
+            or getattr(self, '_bst_ice_orbs', 0) > 0
+            or getattr(self, '_bst_shots', 0) > 0):
         _update_counter(self)
 
 
 def _patched_bomb_handlemessage(self: Bomb, msg: Any) -> Any:
+    if isinstance(msg, ExplodeMessage) and getattr(self, '_bst_ice_orb', False):
+        if self.node:
+            pos = self.node.position
+            bs.emitfx(position=pos, velocity=(0, 3, 0), count=16, scale=0.6,
+                      spread=0.4, chunk_type='ice')
+            _snd('shatter', 0.8, pos)
+        self._bst_flight = None  # type: ignore[attr-defined]
+        self.handlemessage(bs.DieMessage())
+        return None
     if isinstance(msg, ExplodeMessage) and getattr(self, '_bst_shell', False):
         _shell_pop(self)
         return None
@@ -3460,8 +3717,19 @@ def _patched_bomb_handle_impact(self: Bomb) -> None:
         if (homing is not None and node == homing.get('target')
                 and not homing.get('low')):
             here = self.node.position
+            victim = node.getdelegate(Spaz)
+            if (getattr(self, '_bst_ice_orb', False)
+                    and getattr(victim, '_ab_active', False)):
+                _ice_orb_advance(self, node, freeze=False)
+                return
             if _try_contact_deflect(self, homing.get('last', here), here):
                 return  # Met their fist: deflected, not hit.
+            if getattr(self, '_bst_ice_orb', False):
+                _ice_orb_advance(self, node, freeze=True)
+                return
+            if homing.get('tour'):
+                _impact_tour_hit(self, node)
+                return
     _orig_bomb_handle_impact(self)
 
 
