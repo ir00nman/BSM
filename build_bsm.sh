@@ -34,11 +34,9 @@ perl -pi -e 's/net\.froemling\.bombsquad(?=["\.])(?!\.(App|MainActivity)")/net.f
 grep -rl '<string name="app_name_bombsquad">' "$work/dec/res" | xargs perl -pi -e \
   's#<string name="app_name_bombsquad">[^<]*</string>#<string name="app_name_bombsquad">BSM</string>#'
 
-# Моды встроены в игру: копировать в папку mods ничего не нужно.
+# Мод встроен в игру: копировать в папку mods ничего не нужно.
 pydir="$work/dec/assets/ballistica_files/ba_data/python"
-cp "$here/absorb_shield.py" "$pydir/bsm_absorb_shield.py"
-cp "$here/boosters.py" "$pydir/bsm_boosters.py"
-cp "$here/bsm_updater.py" "$pydir/bsm_updater.py"
+cp "$here/bsm.py" "$pydir/bsm_builtin.py"
 
 apktool b -o "$work/unsigned.apk" "$work/dec"
 zipalign -f -P 16 4 "$work/unsigned.apk" "$work/aligned.apk"
