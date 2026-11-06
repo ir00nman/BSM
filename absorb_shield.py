@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from bascenev1lib.actor.bomb import Blast
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.30'
+BSM_VERSION = '2.31'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -253,6 +253,8 @@ def _patched_init(self: Spaz, *args: Any, **kwargs: Any) -> None:
     self._ab_last_grab_tap = -999.0
     self._ab_absorbed = 0.0  # Absorbed during the current shield.
     self._ab_stored = 0.0  # Charge waiting for the next attack.
+    self._ab_pierce_until = 0.0  # Until then, hits blow straight through
+    #                            (see bsm_pierce_shield).
     self._ab_glow_nodes: list[bs.Node] = []
     self._ab_glow_text: bs.Node | None = None
     self._ab_glow_timer: bs.Timer | None = None
@@ -1199,7 +1201,8 @@ def _patched_handlemessage(self: Spaz, msg: Any) -> Any:
                 _merge_bonus(self, msg, entry['amount'], bpos, entry['fdir'])
 
     if self._ab_active and self.node:
-        if isinstance(msg, bs.HitMessage):
+        if (isinstance(msg, bs.HitMessage)
+                and bs.time() >= getattr(self, '_ab_pierce_until', 0.0)):
             _absorb_hit(self, msg)
             return True
         if isinstance(msg, bs.FreezeMessage):
@@ -1277,6 +1280,13 @@ def _hook_charge_projectile_amount(spaz: Spaz, projectile: Any,
         _power_up_bomb(spaz, projectile, amount)
 
 
+def _hook_pierce_shield(spaz: Spaz, duration: float = 0.3) -> None:
+    """Let hits through this shield for a moment instead of eating them
+    (a ping-pong ball from BSM Boosters blows up right through a parry)."""
+    if getattr(spaz, '_ab_active', False) and spaz.node:
+        spaz._ab_pierce_until = bs.time() + duration
+
+
 # ba_meta export babase.Plugin
 class AbsorbShieldPlugin(babase.Plugin):
     """Parry shield that absorbs damage and returns it with the next hit."""
@@ -1302,6 +1312,7 @@ class AbsorbShieldPlugin(babase.Plugin):
         Spaz.bsm_charge_projectile_amount = staticmethod(
             _hook_charge_projectile_amount
         )
+        Spaz.bsm_pierce_shield = staticmethod(_hook_pierce_shield)
 
         Spaz.__init__ = _patched_init
         Spaz.handlemessage = _patched_handlemessage

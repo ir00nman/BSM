@@ -22,6 +22,9 @@
     летит мяч, мигает красным, следующего («готовься») — жёлтым. Мяч
     разгоняется (12 → 30 м/с), пока кто-нибудь не пропустит; после
     двух отбиваний попадание — мощный направленный взрыв конусом 50°.
+    Спарировать такой мяч щитом нельзя: он взрывается прямо сквозь щит —
+    обычный взрыв со всем зарядом (полный заряд 300% по-прежнему
+    пролетает сквозь щит дальше по маршруту).
 
 Обычная бомба, заряжен:
   удар кулаком по своей летящей бомбе — она превращается в 6 мини-снарядов
@@ -109,7 +112,7 @@ if TYPE_CHECKING:
     from typing import Any, Sequence
 
 # Версия для автообновления BSM (bsm_updater.py сверяет её с GitHub).
-BSM_VERSION = '2.36'
+BSM_VERSION = '2.37'
 
 # ------------------------------- Настройки --------------------------------
 
@@ -660,6 +663,11 @@ def _start_homing(bomb: Bomb, sender: bs.Node | None,
                 if state.get('touring'):
                     _impact_tour_hit(bomb, target)
                     return
+                if getattr(victim, '_ab_active', False):
+                    # A parry doesn't swallow the ball: it blows up right
+                    # through the shield (its own blast + all its charge).
+                    _parry_blast(bomb, target)
+                    return
                 _stop()
                 _snd('big_impact', 1.0, bpos)
                 bomb.handlemessage(ExplodeMessage())
@@ -954,6 +962,24 @@ def _deflect_homing(spaz: Spaz, bomb: Bomb) -> None:
          (0.02, 'swip2', 0.9))
     if back_to is not None:
         _snd('activate_beep', 0.8, back_to.position)
+
+
+def _parry_blast(bomb: Bomb, target: bs.Node) -> None:
+    """A parry shield can't swallow this one: the ball detonates on it and
+    the blast - its normal one plus all the charge it carries - blows
+    straight through (Absorb Shield opens the shield for a moment, see
+    bsm_pierce_shield). The full-charge tour and ice orbs are unaffected:
+    they still slip past a shield."""
+    victim = target.getdelegate(Spaz) if target else None
+    if victim is not None:
+        pierce = getattr(Spaz, 'bsm_pierce_shield', None)
+        if pierce is not None:
+            pierce(victim)
+    bomb._bst_flight = None  # type: ignore[attr-defined]
+    if bomb.node:
+        _snd('shield_hit', 1.0, bomb.node.position)
+        _snd('big_impact', 1.0, bomb.node.position)
+    bomb.handlemessage(ExplodeMessage())
 
 
 def _unleash(node: bs.Node) -> None:
@@ -3820,6 +3846,9 @@ def _patched_bomb_handle_impact(self: Bomb) -> None:
                 return
             if homing.get('touring'):
                 _impact_tour_hit(self, node)
+                return
+            if getattr(victim, '_ab_active', False):
+                _parry_blast(self, node)
                 return
     _orig_bomb_handle_impact(self)
 
